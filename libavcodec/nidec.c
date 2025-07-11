@@ -29,6 +29,9 @@
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_ni_quad.h"
 #include "libavutil/mem.h"
+#if (LIBAVCODEC_VERSION_MAJOR >= 61)
+#include "fftools/ffmpeg_sched.h"
+#endif
 
 #define USER_DATA_UNREGISTERED_SEI_PAYLOAD_TYPE 5
 #define NETINT_SKIP_PROFILE 0
@@ -337,6 +340,8 @@ int xcoder_decode_init(AVCodecContext *avctx) {
 #if ((LIBAVCODEC_VERSION_MAJOR > 61) || (LIBAVCODEC_VERSION_MAJOR == 61 && LIBAVCODEC_VERSION_MINOR >= 19))
     if (p_param->dec_input_params.hwframes && p_param->dec_input_params.max_extra_hwframe_cnt == 255)
         p_param->dec_input_params.max_extra_hwframe_cnt = 0;
+    if (p_param->dec_input_params.hwframes && (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1))
+        p_param->dec_input_params.hwframes |= DEFAULT_FRAME_THREAD_QUEUE_SIZE << 4;
 #endif
     //------reassign pix format based on user param done--------//
 

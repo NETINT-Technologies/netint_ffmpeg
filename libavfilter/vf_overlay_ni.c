@@ -34,6 +34,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #include "libavutil/common.h"
 #include "libavutil/eval.h"
@@ -420,6 +421,11 @@ static int init_out_pool(AVFilterContext *ctx)
     if (s->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 #if IS_FFMPEG_61_AND_ABOVE
     s->buffer_limit = 1;
 #endif
@@ -831,6 +837,11 @@ static int process_frame(FFFrameSync *fs)
 
         s->session_opened = 1;
 
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           inlink_main->dst->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         retcode = init_out_pool(inlink_main->dst);
         if (retcode < 0) {
             av_log(ctx, AV_LOG_ERROR,
@@ -1181,7 +1192,18 @@ static int process_frame_inplace(FFFrameSync *fs)
                 return retcode;
             }
         }
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           inlink_main->dst->extra_hw_frames = ((DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0) - DEFAULT_NI_FILTER_POOL_SIZE;
+        }
+        retcode = init_out_pool(inlink_main->dst);
 
+        if (retcode < 0) {
+            av_log(inlink_main->dst, AV_LOG_ERROR,
+                   "Internal output allocation failed rc = %d\n", retcode);
+            return retcode;
+        }
+#endif
         s->initialized = 1;
     }
 

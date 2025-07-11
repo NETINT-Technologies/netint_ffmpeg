@@ -35,6 +35,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #if HAVE_IO_H
 #include <io.h>
@@ -423,6 +424,7 @@ static av_cold int init_hwframe_format(AVFilterContext *ctx, NetIntBgrContext *s
     AVHWFramesContext *pAVHFWCtx;
     AVNIDeviceContext *pAVNIDevCtx;
     int cardno;
+    int pool_size = DEFAULT_NI_FILTER_POOL_SIZE;
 
     format_ctx = av_mallocz(sizeof(HwScaleContext));
     if (!format_ctx) {
@@ -454,6 +456,9 @@ static av_cold int init_hwframe_format(AVFilterContext *ctx, NetIntBgrContext *s
         ni_device_session_context_clear(&format_ctx->api_ctx);
         goto out;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+#endif
 
 #if IS_FFMPEG_70_AND_ABOVE
     s->buffer_limit = 1;
@@ -462,7 +467,7 @@ static av_cold int init_hwframe_format(AVFilterContext *ctx, NetIntBgrContext *s
      * It must be in P2P so that DSP can have access to it. */
     retval = ff_ni_build_frame_pool(&format_ctx->api_ctx, frame->width,
                                         frame->height, AV_PIX_FMT_RGBA,
-                                        DEFAULT_NI_FILTER_POOL_SIZE,
+                                        pool_size,
                                         s->buffer_limit);
     if (retval < 0) {
         av_log(ctx, AV_LOG_ERROR, "could not build frame pool\n");
@@ -1079,6 +1084,12 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     av_log(ctx, AV_LOG_DEBUG, "entering %s\n", __func__);
 
     if (!s->initialized) {
+#if IS_FFMPEG_71_AND_ABOVE
+        AVFilterLink *outlink = link->dst->outputs[0];
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           ctx->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         s->skip_random_offset = 1;
         ret = ni_bgr_config_input(ctx, in);
         if (ret) {

@@ -34,6 +34,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 
  // Needed for FFmpeg-n4.3+
@@ -459,6 +460,11 @@ static int init_out_pool(AVFilterContext *ctx)
     if (s->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 
 #if IS_FFMPEG_61_AND_ABOVE
     s->buffer_limit = 1;
@@ -824,6 +830,11 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
                 goto fail;
         }
 
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           link->dst->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         retcode = init_out_pool(link->dst);
 
         if (retcode < 0) {

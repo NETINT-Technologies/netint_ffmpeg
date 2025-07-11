@@ -31,6 +31,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #if HAVE_IO_H
 #include <io.h>
@@ -502,6 +503,7 @@ static av_cold int init_hwframe_crop(AVFilterContext *ctx, NetIntHvsplusContext 
     AVHWFramesContext *pAVHFWCtx;
     AVNIDeviceContext *pAVNIDevCtx;
     int cardno;
+    int pool_size = DEFAULT_NI_FILTER_POOL_SIZE;
 
     av_log(ctx, AV_LOG_INFO, "%s: format %s frame pool for w %d h %d\n",
             __func__, av_get_pix_fmt_name(format), s->in_width, s->in_height);
@@ -533,13 +535,16 @@ static av_cold int init_hwframe_crop(AVFilterContext *ctx, NetIntHvsplusContext 
         ni_device_session_context_clear(&hwc_ctx->api_ctx);
         goto out;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+#endif
 #if IS_FFMPEG_70_AND_ABOVE
     s->buffer_limit = 1;
 #endif
     /* Create scale frame pool on device */
     retval = ff_ni_build_frame_pool(&hwc_ctx->api_ctx, s->in_width,
                                     s->in_height, format,
-                                    DEFAULT_NI_FILTER_POOL_SIZE, s->buffer_limit);
+                                    pool_size, s->buffer_limit);
 
     if (retval < 0) {
         av_log(ctx, AV_LOG_ERROR, "Error: could not build frame pool\n");
@@ -1414,6 +1419,12 @@ static int filter_frame_internal(AVFilterLink *link, AVFrame *in)
         if (hwframe) {
             pAVHFWCtx = (AVHWFramesContext *) in->hw_frames_ctx->data;
         }
+#if IS_FFMPEG_71_AND_ABOVE
+        AVFilterLink *outlink = link->dst->outputs[0];
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           ctx->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         ret = config_input(ctx, in);
         if (ret) {
             av_log(ctx, AV_LOG_ERROR, "Error: failed to config input\n");
