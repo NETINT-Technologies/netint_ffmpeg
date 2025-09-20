@@ -2,7 +2,7 @@
 Netint FFmpeg Change List - Quadra
 ==================================
 
-This document was last updated for Netint Quadra SW release v5.3.0.
+This document was last updated for Netint Quadra SW release v5.4.0.
 
 --------------------------------------------------
 build_ffmpeg.sh
@@ -68,7 +68,7 @@ Send hw filtered frames one by one
 --------------------------------------------------
 fftools/ffmpeg_mux_init.c
 --------------------------------------------------
-Automatically enable gen_global_headers in video stream when output format is MKV, HLS, ASF, FLV, mp4 or segment
+Set enc_ctx->flag to AV_CODEC_FLAG_MP4_MOV for mp4 or mov output extension to handle sequence change correctly
 
 --------------------------------------------------
 ffmpeg_ni_quad.c    fftools/ffmpeg_ni_quad.c
@@ -107,6 +107,7 @@ Register Netint SCTE-35 dummy decoder
 --------------------------------------------------
 libavcodec/avcodec.h
 --------------------------------------------------
+Add AV_CODEC_FLAG_MP4_MOV
 Always #include 'version.h' to support backwards compatibility
 Always #include 'codec_desc.h' to support NI code build
 ----------------------------------------------
@@ -174,13 +175,14 @@ libavcodec/Makefile
 Add compile switches for Netint Quadra decoders and encoders
 Add compile switches for Netint Logan decoders and encoders
 Add compile switches for Netint codecs HEVC tile parallelism support
+Remove nicodec.c from makefile
 Register Netint SCTE-35 dummy decoder
 
 --------------------------------------------------
-libavcodec/nicodec.c
 libavcodec/nicodec.h
 --------------------------------------------------
 Common libavcodec interfacing functions for Netint Quadra decoders
+Move functions to nidec.h to decouple encoder from from the decoder in libavcodec
 
 --------------------------------------------------
 libavcodec/nicodec_logan.c
@@ -307,6 +309,7 @@ libavcodec/packet.h
 Add AV_PKT_DATA_SLICE_ADDR to AVPacketSideDataType
 Add AV_PKT_DATA_PKT_INFO to AVPacketSideDataType
 Add AV_PKT_DATA_PPU_CONFIG to AVPacketSideDataType and AVNIPpuConfig struct
+Add new param "ppu_reconfig_mode" in AVNIPpuConfig to enable reconfig ppu
 
 --------------------------------------------------
 libavfilter/allfilters.c
@@ -421,6 +424,7 @@ Add 'ni_quadra_hvsplus' as a filter for enhancing VQ by AI engine performing the
 libavfilter/vf_hwupload.c
 --------------------------------------------------
 Modify hwupload filter to backpressure inlink frames when quadra device buffer is unavailable
+Remove reference to upcoming deprecated AVFilterContext->ready field
 
 --------------------------------------------------
 libavfilter/vf_hwupload_ni_logan.c
@@ -552,6 +556,7 @@ libavformat/mpegtsenc.c
 Add support for maximum bitrate descriptor for Program Map Table, in program info and each ES (a/v) info section
 Add support for setting unique value to maximum audio bitrate descriptor for up to 10 different audio tracks
 Add support for muxing SCTE35 into mpegts
+Add scte35_copyts option to mpegts muxer to prevent SCTE-35 pts from being altered
 
 --------------------------------------------------
 libavformat/mpegts.h

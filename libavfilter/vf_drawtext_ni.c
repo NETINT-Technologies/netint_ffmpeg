@@ -3489,8 +3489,8 @@ static int activate(AVFilterContext *ctx)
         if (ret == NI_RETCODE_ERROR_UNSUPPORTED_FW_VERSION) {
             av_log(ctx, AV_LOG_WARNING, "No backpressure support in FW\n");
         } else if (ret < 0) {
-            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
-                __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
             return FFERROR_NOT_READY;
         }
 
@@ -3500,7 +3500,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

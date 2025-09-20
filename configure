@@ -6890,8 +6890,8 @@ done
 if enabled ni_quadra; then
     if ! check_pkg_config ni_quadra xcoder ni_device_api.h ni_device_open; then
         disable_with_reason ni_quadra "libxcoder not found"
-    elif ! check_cpp_condition xcoder ni_defs.h "LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR >= 70"; then
-        disable_with_reason ni_quadra "libxcoder API version must be >= 2.70"
+    elif ! check_cpp_condition xcoder ni_defs.h "LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR >= 72"; then
+        disable_with_reason ni_quadra "libxcoder API version must be >= 2.72"
     fi
 fi
 

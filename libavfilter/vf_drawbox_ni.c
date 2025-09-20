@@ -35,6 +35,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
  // Needed for FFmpeg-n4.3+
 #if (LIBAVFILTER_VERSION_MAJOR >= 8 || LIBAVFILTER_VERSION_MAJOR >= 7 && LIBAVFILTER_VERSION_MINOR >= 85)
@@ -298,6 +299,11 @@ static int init_out_pool(AVFilterContext *ctx)
     if (s->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 #if IS_FFMPEG_61_AND_ABOVE
     s->buffer_limit = 1;
 #endif
@@ -507,6 +513,11 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
                 goto fail;
         }
 
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           link->dst->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         retcode = init_out_pool(link->dst);
 
         if (retcode < 0) {
@@ -809,8 +820,8 @@ static int activate(AVFilterContext *ctx)
         if (ret == NI_RETCODE_ERROR_UNSUPPORTED_FW_VERSION) {
             av_log(ctx, AV_LOG_WARNING, "No backpressure support in FW\n");
         } else if (ret < 0) {
-            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
-                __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
             return FFERROR_NOT_READY;
         }
 
@@ -820,7 +831,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

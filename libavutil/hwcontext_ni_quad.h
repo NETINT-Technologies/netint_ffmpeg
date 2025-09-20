@@ -57,6 +57,7 @@ typedef enum _ni_filter_poolsize_code {
     NI_MERGE_ID         = -15,
     NI_FLIP_ID          = -16,
     NI_HVSPLUS_ID       = -17,
+    NI_AI_ALIGN_ID      = -18,
 } ni_filter_poolsize_code;
 
 /**

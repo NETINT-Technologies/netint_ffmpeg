@@ -90,18 +90,19 @@ static int query_formats(AVFilterContext *ctx)
     };
     AVFilterFormats *in_fmts = ff_make_format_list(input_pix_fmts);
     AVFilterFormats *out_fmts = ff_make_format_list(output_pix_fmts);
+    int ret;
 
     // Needed for FFmpeg-n4.4+
 #if (LIBAVFILTER_VERSION_MAJOR >= 8 || LIBAVFILTER_VERSION_MAJOR >= 7 && LIBAVFILTER_VERSION_MINOR >= 110)
-    // NOLINTNEXTLINE(clang-diagnostic-unused-result)
-    ff_formats_ref(in_fmts, &ctx->inputs[0]->outcfg.formats);
-    // NOLINTNEXTLINE(clang-diagnostic-unused-result)
-    ff_formats_ref(out_fmts, &ctx->outputs[0]->incfg.formats);
+    if ((ret = ff_formats_ref(in_fmts, &ctx->inputs[0]->outcfg.formats)) < 0)
+        return ret;
+    if ((ret = ff_formats_ref(out_fmts, &ctx->outputs[0]->incfg.formats)) < 0)
+        return ret;
 #else
-    // NOLINTNEXTLINE(clang-diagnostic-unused-result)
-    ff_formats_ref(in_fmts, &ctx->inputs[0]->out_formats);
-    // NOLINTNEXTLINE(clang-diagnostic-unused-result)
-    ff_formats_ref(out_fmts, &ctx->outputs[0]->in_formats);
+    if ((ret = ff_formats_ref(in_fmts, &ctx->inputs[0]->out_formats)) < 0)
+        return ret;
+    if ((ret = ff_formats_ref(out_fmts, &ctx->outputs[0]->in_formats)) < 0)
+        return ret;
 #endif
 
     return 0;
@@ -590,7 +591,7 @@ static int activate(AVFilterContext *ctx)
         if (ret < 0) {
             return ret;
         } else {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
     }
 

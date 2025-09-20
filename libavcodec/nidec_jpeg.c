@@ -56,7 +56,7 @@ static const AVClass jpeg_xcoderdec_class = {
 };
 
 #if (LIBAVCODEC_VERSION_MAJOR > 59 || (LIBAVCODEC_VERSION_MAJOR == 59 && LIBAVCODEC_VERSION_MINOR >= 37))
-FFCodec
+const FFCodec
 #else
 AVCodec
 #endif
@@ -72,9 +72,14 @@ ff_jpeg_ni_quadra_decoder = {
     .p.id           = AV_CODEC_ID_MJPEG,
     .p.capabilities = AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE,
     .p.priv_class   = &jpeg_xcoderdec_class,
+#if (LIBAVCODEC_VERSION_MAJOR > 61)
+    CODEC_PIXFMTS(AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD),
+#else
     .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD,
                                                     AV_PIX_FMT_NONE },
-    FF_CODEC_RECEIVE_FRAME_CB(xcoder_receive_frame),
+#endif
+    FF_CODEC_RECEIVE_FRAME_CB(ff_xcoder_receive_frame),
+    .p.wrapper_name = "libxcoder_quadra",
 #else
     .name           = JPEG_NI_QUADRA_DEC,
     .long_name      = NULL_IF_CONFIG_SMALL("JPEG NETINT Quadra decoder v" NI_XCODER_REVISION),
@@ -84,12 +89,13 @@ ff_jpeg_ni_quadra_decoder = {
     .priv_class     = &jpeg_xcoderdec_class,
     .pix_fmts       = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD,
                                                     AV_PIX_FMT_NONE },
-    .receive_frame  = xcoder_receive_frame,
+    .receive_frame  = ff_xcoder_receive_frame,
+    .wrapper_name   = "libxcoder_quadra",
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS,
 #endif
     .hw_configs     = ff_ni_quad_hw_configs,
-    .init           = xcoder_decode_init,
-    .close          = xcoder_decode_close,
+    .init           = ff_xcoder_decode_init,
+    .close          = ff_xcoder_decode_close,
     .priv_data_size = sizeof(XCoderDecContext),
-    .flush          = xcoder_decode_flush,
+    .flush          = ff_xcoder_decode_flush,
 };

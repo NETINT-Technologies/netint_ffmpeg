@@ -76,6 +76,14 @@ typedef struct AiContext {
     ni_session_data_io_t api_dst_frame;
 } AiContext;
 
+typedef struct AiAlignContext {
+    ni_session_context_t api_ctx;
+    ni_session_data_io_t api_dst_frame;
+    ni_frame_config_t frame_in;
+    ni_frame_config_t frame_out;
+    int session_opened;
+} AiAlignContext;
+
 typedef struct NetIntAiPreprocessContext {
     const AVClass *class;
     const char *nb_file;        /* path to network binary */
@@ -85,6 +93,8 @@ typedef struct NetIntAiPreprocessContext {
 
     AiContext *ai_ctx;
 
+    AiAlignContext *ai_align_ctx;
+
     AVBufferRef *out_frames_ref;
 
     ni_ai_pre_network_t network;
@@ -92,6 +102,8 @@ typedef struct NetIntAiPreprocessContext {
     int ai_timeout;
     int channel_mode;
     int buffer_limit;
+    int align_width;
+    int skip_ai_align;
 } NetIntAiPreprocessContext;
 
 static int query_formats(AVFilterContext * ctx)
@@ -235,6 +247,11 @@ static int init_ai_context(AVFilterContext * ctx,
     // Create frame pool
     format = ff_ni_ffmpeg_to_gc620_pix_fmt(pAVHFWCtx->sw_format);
     options = NI_AI_FLAG_IO | NI_AI_FLAG_PC;
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+      (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 78))
+    if (s->channel_mode == 1)
+        options |= NI_AI_FLAG_SC;
+#endif
     if (s->buffer_limit)
         options |= NI_AI_FLAG_LM;
 
@@ -276,14 +293,10 @@ static void ni_destroy_network(AVFilterContext * ctx,
 
         if (network->layers) {
             for (i = 0; i < network->raw.output_num; i++) {
-                if (network->layers[i].output) {
-                    free(network->layers[i].output);
-                    network->layers[i].output = NULL;
-                }
+                av_freep(&network->layers[i].output);
             }
 
-            free(network->layers);
-            network->layers = NULL;
+            av_freep(&network->layers);
         }
     }
 }
@@ -305,7 +318,7 @@ static int ni_create_network(AVFilterContext * ctx,
     }
 
     network->layers =
-        malloc(sizeof(ni_ai_pre_network_layer_t) * ni_network->output_num);
+        av_malloc(sizeof(ni_ai_pre_network_layer_t) * ni_network->output_num);
     if (!network->layers) {
         av_log(ctx, AV_LOG_ERROR,
                "cannot allocate network layer memory\n");
@@ -331,7 +344,7 @@ static int ni_create_network(AVFilterContext * ctx,
                    network->layers[i].channel);
 
         network->layers[i].output =
-            malloc(network->layers[i].output_number * sizeof(float));
+            av_malloc(network->layers[i].output_number * sizeof(float));
         if (!network->layers[i].output) {
             av_log(ctx, AV_LOG_ERROR,
                    "failed to allocate network layer %d output buffer\n",
@@ -358,6 +371,180 @@ out:
     return ret;
 }
 
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+      (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 79))
+static void cleanup_ai_align_context(AVFilterContext *ctx) {
+    NetIntAiPreprocessContext *s = ctx->priv;
+    AiAlignContext *ai_align_ctx = s->ai_align_ctx;
+    if (ai_align_ctx) {
+        if (ai_align_ctx->api_dst_frame.data.frame.p_buffer)
+            ni_frame_buffer_free(&ai_align_ctx->api_dst_frame.data.frame);
+
+        if (ai_align_ctx->session_opened) {
+            /* Close operation will free the device frames */
+            ni_device_session_close(&ai_align_ctx->api_ctx, 1, NI_DEVICE_TYPE_SCALER);
+            ni_device_session_context_clear(&ai_align_ctx->api_ctx);
+        }
+        av_free(ai_align_ctx);
+        s->ai_align_ctx = NULL;
+    }
+}
+
+static int init_ai_align_context(AVFilterContext *ctx, AVFrame *frame) {
+    NetIntAiPreprocessContext *s = ctx->priv;
+    AiAlignContext *ai_align_ctx;
+    int max_align_w = 0;
+    int retcode;
+    if (!s->skip_ai_align && NI_VPU_ALIGN128(frame->width) == frame->width)
+    {
+        s->skip_ai_align = 1;
+    }
+    max_align_w = NI_VPU_ALIGN128(frame->width) - frame->width;
+    s->align_width = s->align_width > max_align_w ? max_align_w : s->align_width;
+    s->align_width = (s->align_width > 0) ? s->align_width : max_align_w;
+    if (!s->skip_ai_align && s->align_width <= 0)
+        s->skip_ai_align = 1;
+
+    if (s->skip_ai_align)
+    {
+        return 0;
+    }
+
+    if (frame->format != AV_PIX_FMT_NI_QUAD)
+    {
+        av_log(ctx, AV_LOG_ERROR, "Ai align not support sw frame!\n");
+        return AVERROR(EIO);
+    }
+
+    ai_align_ctx = av_mallocz(sizeof(AiAlignContext));
+    if (!ai_align_ctx) {
+        av_log(ctx, AV_LOG_ERROR, "failed to allocate ai_align context\n");
+        return AVERROR(ENOMEM);
+    }
+
+    retcode = ni_device_session_context_init(&ai_align_ctx->api_ctx);
+    if (retcode < 0)
+    {
+        av_log(ctx, AV_LOG_ERROR,
+                "ni ai align filter device session open failed\n");
+        cleanup_ai_align_context(ctx);
+        return retcode;
+    }
+
+    ai_align_ctx->api_ctx.device_handle = s->ai_ctx->api_ctx.device_handle;
+    ai_align_ctx->api_ctx.blk_io_handle = s->ai_ctx->api_ctx.blk_io_handle;
+    ai_align_ctx->api_ctx.hw_action     = NI_CODEC_HW_ENABLE;
+    ai_align_ctx->api_ctx.hw_id         = s->ai_ctx->api_ctx.hw_id;
+
+    ai_align_ctx->api_ctx.device_type = NI_DEVICE_TYPE_SCALER;
+    ai_align_ctx->api_ctx.scaler_operation = NI_SCALER_OPCODE_AI_ALIGN;
+    ai_align_ctx->api_ctx.keep_alive_timeout = s->keep_alive_timeout;
+
+    retcode = ni_device_session_open(&ai_align_ctx->api_ctx, NI_DEVICE_TYPE_SCALER);
+    if (retcode != NI_RETCODE_SUCCESS) {
+        av_log(ctx, AV_LOG_ERROR, "failed to open ai session. retval %d\n",
+               retcode);
+        cleanup_ai_align_context(ctx);
+        return AVERROR(EIO);
+    }
+    ai_align_ctx->session_opened = 1;
+    av_log(ctx, AV_LOG_DEBUG, "Open ai align session to card %d, hdl %d, blk_hdl %d\n",
+                ai_align_ctx->api_ctx.hw_id, ai_align_ctx->api_ctx.device_handle,
+                ai_align_ctx->api_ctx.blk_io_handle);
+    s->ai_align_ctx = ai_align_ctx;
+    return 0;
+}
+
+static int do_ai_align(AVFilterContext *ctx, AVFrame *frame, niFrameSurface1_t *frame_surface) {
+    NetIntAiPreprocessContext *s = ctx->priv;
+    AiContext *ai_ctx = s->ai_ctx;
+    AiAlignContext *ai_align_ctx = s->ai_align_ctx;
+    int align_format;
+    int retcode;
+    AVHWFramesContext *pAVHFWCtx;
+    pAVHFWCtx   = (AVHWFramesContext *)frame->hw_frames_ctx->data;
+
+    align_format = ff_ni_ffmpeg_to_gc620_pix_fmt(pAVHFWCtx->sw_format);
+
+    retcode = ni_frame_buffer_alloc_hwenc(&ai_align_ctx->api_dst_frame.data.frame,
+                                          frame->width,
+                                          frame->height,
+                                          0);
+    if (retcode != 0)
+    {
+        retcode = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    ai_align_ctx->frame_in.picture_width  = FFALIGN(frame->width, 2);
+    ai_align_ctx->frame_in.picture_height = FFALIGN(frame->height, 2);
+    ai_align_ctx->frame_in.picture_format = align_format;
+    ai_align_ctx->frame_in.session_id     = frame_surface->ui16session_ID;
+    ai_align_ctx->frame_in.output_index   = frame_surface->output_idx;
+    ai_align_ctx->frame_in.frame_index    = frame_surface->ui16FrameIdx;
+    ai_align_ctx->frame_in.rectangle_x    = frame->width;
+    ai_align_ctx->frame_in.rectangle_y    = 0;
+    ai_align_ctx->frame_in.rectangle_width= s->align_width;
+    ai_align_ctx->frame_in.rectangle_height= frame->height;
+
+    /*
+     * Config device input frame parameters
+     */
+    retcode = ni_device_config_frame(&ai_align_ctx->api_ctx, &ai_align_ctx->frame_in);
+
+    if (retcode != NI_RETCODE_SUCCESS) {
+        av_log(ctx, AV_LOG_DEBUG,
+               "Can't allocate device input frame %d\n", retcode);
+        retcode = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    ai_align_ctx->frame_out.picture_width  = frame->width;
+    ai_align_ctx->frame_out.picture_height = frame->height;
+    ai_align_ctx->frame_out.picture_format = align_format;
+
+    /* Allocate hardware device destination frame. This acquires a frame
+     * from the pool
+     */
+    retcode = ni_device_alloc_frame(&ai_align_ctx->api_ctx,
+                                    FFALIGN(frame->width, 2),
+                                    FFALIGN(frame->height, 2),
+                                    align_format,
+                                    NI_SCALER_FLAG_IO,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    frame_surface->ui16FrameIdx,
+                                    NI_DEVICE_TYPE_SCALER);
+
+    if (retcode != NI_RETCODE_SUCCESS) {
+        av_log(ctx, AV_LOG_DEBUG,
+               "Can't allocate device output frame %d\n", retcode);
+        retcode = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    /* Set the new frame index */
+    retcode = ni_device_session_read_hwdesc(&ai_align_ctx->api_ctx, &ai_align_ctx->api_dst_frame,
+                                            NI_DEVICE_TYPE_SCALER);
+
+    if (retcode != NI_RETCODE_SUCCESS) {
+        av_log(ctx, AV_LOG_ERROR,
+               "Can't acquire output frame %d\n",retcode);
+        retcode = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    av_log(ctx, AV_LOG_DEBUG,
+            "vf_ai_align_ni.c:IN trace ui16FrameIdx = [%d] --> out [%d] \n",
+            frame_surface->ui16FrameIdx, frame_surface->ui16FrameIdx);
+fail:
+    return retcode;
+}
+#endif
+
 static av_cold int init(AVFilterContext * ctx)
 {
     NetIntAiPreprocessContext *s = ctx->priv;
@@ -381,6 +568,10 @@ static av_cold void uninit(AVFilterContext * ctx)
 
     ni_destroy_network(ctx, network);
 
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+      (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 79))
+    cleanup_ai_align_context(ctx);
+#endif
     av_buffer_unref(&s->out_frames_ref);
     s->out_frames_ref = NULL;
 }
@@ -441,6 +632,14 @@ static int config_input(AVFilterContext * ctx, AVFrame * frame)
         }
     }
 
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+      (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 79))
+    ret = init_ai_align_context(ctx, frame);
+    if (ret != 0) {
+        av_log(ctx, AV_LOG_ERROR, "failed to initialize ai_align context\n");
+        goto fail_out;
+    }
+#endif
     s->initialized = 1;
     return 0;
 
@@ -449,6 +648,10 @@ fail_out:
 
     ni_destroy_network(ctx, &s->network);
 
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+    (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 79))
+    cleanup_ai_align_context(ctx);
+#endif
     return ret;
 }
 
@@ -985,7 +1188,7 @@ static int filter_frame(AVFilterLink * link, AVFrame * in)
         out->data[3] = av_malloc(sizeof(niFrameSurface1_t));
         if (!out->data[3]) {
             av_log(ctx, AV_LOG_ERROR,
-                   "ni ai_pre filter av_alloc returned NULL\n");
+                   "ni ai_pre filter av_malloc returned NULL\n");
             ret = AVERROR(ENOMEM);
             goto failed_out;
         }
@@ -1004,6 +1207,21 @@ static int filter_frame(AVFilterLink * link, AVFrame * in)
 
 #ifdef NI_MEASURE_LATENCY
         ff_ni_update_benchmark(NULL);
+#endif
+
+#if ((LIBXCODER_API_VERSION_MAJOR > 2) ||                                        \
+      (LIBXCODER_API_VERSION_MAJOR == 2 && LIBXCODER_API_VERSION_MINOR>= 79))
+        if (!s->skip_ai_align)
+        {
+            retval = do_ai_align(ctx, in, frame_surface);
+            if (retval != 0)
+            {
+                av_log(ctx, AV_LOG_ERROR, "ai align failed\n");
+                ret = AVERROR(ENOMEM);
+                goto failed_out;
+            }
+            frame_surface = (niFrameSurface1_t *) s->ai_align_ctx->api_dst_frame.data.frame.p_data[3];
+        }
 #endif
 
         do {
@@ -1327,7 +1545,7 @@ static int activate(AVFilterContext * ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }
@@ -1352,6 +1570,8 @@ static const AVOption ni_ai_pre_options[] = {
     { "mode",    "filter mode",                       OFFSET(channel_mode), AV_OPT_TYPE_INT, {.i64 = 0},  0,  1,                        FLAGS, "mode" },
         { "YUV",    "process channels Y, U, and V", 0, AV_OPT_TYPE_CONST, {.i64 = 0}, 0, 0, FLAGS, "mode" },
         { "Y_only", "process only channel Y",       0, AV_OPT_TYPE_CONST, {.i64 = 1}, 0, 0, FLAGS, "mode" },
+    { "align_w", "Set width of the align.",           OFFSET(align_width),  AV_OPT_TYPE_INT, {.i64 = 4}, 0, NI_MAX_RESOLUTION_WIDTH,  FLAGS },
+    { "skip_ai_align", "Set skip do ai align.",       OFFSET(skip_ai_align), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1,  FLAGS },
     { "timeout", "Timeout for AI operations",         OFFSET(ai_timeout),   AV_OPT_TYPE_INT, {.i64 = NI_DEFAULT_KEEP_ALIVE_TIMEOUT}, NI_MIN_KEEP_ALIVE_TIMEOUT, NI_MAX_KEEP_ALIVE_TIMEOUT, FLAGS },
     NI_FILT_OPTION_KEEPALIVE10,
     NI_FILT_OPTION_BUFFER_LIMIT,

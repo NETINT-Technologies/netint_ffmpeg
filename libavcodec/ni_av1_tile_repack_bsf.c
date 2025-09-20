@@ -526,12 +526,10 @@ fail_alloc_pkts:
     for (i -= 1; i >= 0; i--) {
         av_packet_free(&s->tile_pkt[i]);
     }
-    free(s->tile_pkt);
-    s->tile_pkt = NULL;
+    av_freep(&s->tile_pkt);
 
 fail_alloc_tile_pkt:
     av_packet_free(&s->buffer_pkt);
-    s->buffer_pkt = NULL;
 
     return ret;
 }
@@ -570,13 +568,11 @@ static void av1_tile_repack_close(AVBSFContext *ctx) {
 #endif
 
     av_packet_free(&s->buffer_pkt);
-    s->buffer_pkt = NULL;
 
     for (i = 0; i < s->tile_num; i++) {
         av_packet_free(&s->tile_pkt[i]);
     }
-    free(s->tile_pkt);
-    s->tile_pkt = NULL;
+    av_freep(&s->tile_pkt);
 
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 134)
     ff_cbs_fragment_reset(&s->temporal_unit);

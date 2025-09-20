@@ -376,6 +376,7 @@ typedef struct AVNIPpuConfig
     uint16_t out_enabled[3];
     uint16_t ppu_w[3];
     uint16_t ppu_h[3];
+    uint8_t  ppu_reconfig_mode;
 } AVNIPpuConfig;
 
 #if FF_API_QUALITY_FACTOR

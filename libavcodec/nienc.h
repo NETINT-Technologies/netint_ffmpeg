@@ -35,6 +35,8 @@
 #include "internal.h"
 #include "libavutil/opt.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/fifo.h"
+
 // Needed for hwframe on FFmpeg-n4.3+
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 82)
 #include "hwconfig.h"
@@ -46,6 +48,74 @@
 
 #define IS_FFMPEG_61_AND_ABOVE_FOR_LIBAVCODEC                                                \
     (LIBAVCODEC_VERSION_MAJOR  >= 60)
+
+typedef struct XCoderEncContext {
+    AVClass *avclass;
+
+    /* from the command line, which resource allocation method we use */
+    char *dev_xcoder;
+    char *dev_xcoder_name;          /* dev name of the xcoder card to use */
+    char *blk_xcoder_name;          /* blk name of the xcoder card to use */
+    int dev_enc_idx;                /* user-specified encoder index */
+    char *dev_blk_name;             /* user-specified encoder block device name */
+    int nvme_io_size;               /* custom nvme io size */
+    int keep_alive_timeout;         /* keep alive timeout setting */
+    ni_device_context_t *rsrc_ctx;  /* resource management context */
+    uint64_t xcode_load_pixel; /* xcode load in pixels by this encode task */
+
+#if LIBAVUTIL_VERSION_MAJOR >= 59 //7.0
+    AVFifo *fme_fifo;
+#else
+    // frame fifo, to be used for sequence change frame buffering
+    AVFifoBuffer *fme_fifo;
+#endif
+    int eos_fme_received;
+    AVFrame buffered_fme; // buffered frame for sequence change handling
+
+    ni_session_data_io_t  api_pkt; /* used for receiving bitstream from xcoder */
+    ni_session_data_io_t   api_fme; /* used for sending YUV data to xcoder */
+    ni_session_context_t api_ctx;
+    ni_xcoder_params_t api_param;
+
+    int started;
+    uint8_t *p_spsPpsHdr;
+    int spsPpsHdrLen;
+    int spsPpsArrived;
+    int firstPktArrived;
+    int64_t dtsOffset;
+    int gop_offset_count;/*this is a counter to guess the pts only dtsOffset times*/
+    uint64_t total_frames_received;
+    int64_t first_frame_pts;
+    int64_t latest_dts;
+
+    int encoder_flushing;
+    int encoder_eof;
+
+    // ROI
+    int roi_side_data_size;
+    AVRegionOfInterest *av_rois;  // last passed in AVRegionOfInterest
+    int nb_rois;
+
+    /* backup copy of original values of -enc command line option */
+    int  orig_dev_enc_idx;
+
+    AVFrame *sframe_pool[MAX_NUM_FRAMEPOOL_HWAVFRAME];
+    int aFree_Avframes_list[MAX_NUM_FRAMEPOOL_HWAVFRAME + 1];
+    int freeHead;
+    int freeTail;
+
+    /* below are all command line options */
+    char *xcoder_opts;
+    char *xcoder_gop;
+    int gen_global_headers;
+    int udu_sei;
+    int timecode_passthru;
+
+    int reconfigCount;
+    int seqChangeCount;
+    // actual enc_change_params is in ni_session_context !
+
+} XCoderEncContext;
 
 #define OFFSETENC(x) offsetof(XCoderEncContext, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
@@ -87,7 +157,7 @@
 // "gen_global_headers" encoder options
 #define NI_ENC_OPTION_GEN_GLOBAL_HEADERS \
     { "gen_global_headers", "Generate SPS and PPS headers during codec initialization.", \
-      OFFSETENC(gen_global_headers), AV_OPT_TYPE_INT, { .i64 = GEN_GLOBAL_HEADERS_OFF }, \
+      OFFSETENC(gen_global_headers), AV_OPT_TYPE_INT, { .i64 = GEN_GLOBAL_HEADERS_AUTO }, \
       GEN_GLOBAL_HEADERS_AUTO, GEN_GLOBAL_HEADERS_ON, VE, "gen_global_headers" }, \
     {     "auto", NULL, 0, AV_OPT_TYPE_CONST, \
           { .i64 = GEN_GLOBAL_HEADERS_AUTO }, 0, 0, VE, "gen_global_headers" }, \
@@ -100,33 +170,24 @@
     { "udu_sei", "Pass through user data unregistered SEI if available", OFFSETENC(udu_sei), \
       AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VE }
 
-int xcoder_encode_init(AVCodecContext *avctx);
+#define NI_ENC_OPTION_TIMECODE_PASSTHRU \
+    { "timecode_passthru", "Enable passthrough of time code in picture timing / time code SEI if present.", \
+      OFFSETENC(timecode_passthru), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VE, "timecode_passthru"}
 
-int xcoder_encode_close(AVCodecContext *avctx);
+av_cold int ff_xcoder_encode_init(AVCodecContext *avctx);
 
-int xcoder_encode_sequence_change(AVCodecContext *avctx, int width, int height, int bit_depth_factor);
-
-int xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame);
-
-int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt);
-
+int ff_xcoder_encode_close(AVCodecContext *avctx);
 // for FFmpeg 4.4+
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 134)
 int ff_xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt);
+int ff_xcoder_receive_packet2(AVCodecContext *avctx, AVPacket *pkt);
+int ff_xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame);
 #else
-int xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
-                        const AVFrame *frame, int *got_packet);
+int ff_xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame);
+int ff_xcoder_receive_packet2(AVCodecContext *avctx, AVPacket *pkt);
+int ff_xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
+                                  const AVFrame *frame, int *got_packet);
 #endif
-
-bool free_frames_isempty(XCoderEncContext *ctx);
-
-bool free_frames_isfull(XCoderEncContext *ctx);
-
-int deq_free_frames(XCoderEncContext *ctx);
-
-int enq_free_frames(XCoderEncContext *ctx, int idx);
-
-int recycle_index_2_avframe_index(XCoderEncContext *ctx, uint32_t recycleIndex);
 
 // Needed for hwframe on FFmpeg-n4.3+
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 82)

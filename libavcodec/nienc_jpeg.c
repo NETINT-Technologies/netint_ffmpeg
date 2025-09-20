@@ -32,7 +32,7 @@ static const AVClass jpeg_xcoderenc_class = {
 };
 
 #if (LIBAVCODEC_VERSION_MAJOR > 59 || (LIBAVCODEC_VERSION_MAJOR == 59 && LIBAVCODEC_VERSION_MINOR >= 37))
-FFCodec
+const FFCodec
 #else
 AVCodec
 #endif
@@ -47,31 +47,40 @@ ff_jpeg_ni_quadra_encoder = {
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_MJPEG,
     .p.priv_class   = &jpeg_xcoderenc_class,
-    .p.capabilities = AV_CODEC_CAP_DELAY,
+    .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE,
+#if (LIBAVCODEC_VERSION_MAJOR > 61)
+    CODEC_PIXFMTS(AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD),
+#else
     .p.pix_fmts = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD,
                                                 AV_PIX_FMT_NONE },
+#endif
     FF_CODEC_RECEIVE_PACKET_CB(ff_xcoder_receive_packet),
+    .p.wrapper_name = "libxcoder_quadra",
 #else
     .name = "jpeg_ni_quadra_enc",
     .long_name      = NULL_IF_CONFIG_SMALL("JPEG NETINT Quadra encoder v" NI_XCODER_REVISION),
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_MJPEG,
     .priv_class     = &jpeg_xcoderenc_class,
-    .capabilities   = AV_CODEC_CAP_DELAY,
+    .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE,
     .pix_fmts = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NI_QUAD,
                                               AV_PIX_FMT_NONE },
+    .wrapper_name   = "libxcoder_quadra",
 // FFmpeg-n4.4+ has no more .send_frame;
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 134)
     .receive_packet = ff_xcoder_receive_packet,
 #else
-    .send_frame     = xcoder_send_frame,
-    .receive_packet = xcoder_receive_packet,
-    .encode2        = xcoder_encode_frame,
+    .send_frame     = ff_xcoder_send_frame,
+    .receive_packet = ff_xcoder_receive_packet2,
+    .encode2        = ff_xcoder_encode_frame,
 #endif
 #endif
-    .init           = xcoder_encode_init,
-    .close          = xcoder_encode_close,
+    .init           = ff_xcoder_encode_init,
+    .close          = ff_xcoder_encode_close,
     .priv_data_size = sizeof(XCoderEncContext),
+#if (LIBAVCODEC_VERSION_MAJOR > 60)
+    .color_ranges   = AVCOL_RANGE_JPEG,
+#endif
 // Needed for hwframe on FFmpeg-n4.3+
 #if (LIBAVCODEC_VERSION_MAJOR >= 59 || LIBAVCODEC_VERSION_MAJOR >= 58 && LIBAVCODEC_VERSION_MINOR >= 82)
     .hw_configs     = ff_ni_enc_hw_configs,

@@ -1381,17 +1381,6 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
         threads_manual = !!av_dict_get(encoder_opts, "threads", NULL, 0);
 
-        // NETINT: automatically enable gen_global_headers for MKV/HLS/ASF/FLV containers
-        if ((ost->enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO) &&
-            (!strcmp(mux->fc->oformat->name, "segment") ||
-        !strcmp(mux->fc->oformat->name, "matroska") ||
-            !strcmp(mux->fc->oformat->name, "hls") ||
-            !strcmp(mux->fc->oformat->name, "asf") ||
-            !strcmp(mux->fc->oformat->name, "flv") ||
-            !strcmp(mux->fc->oformat->name, "mp4"))) {
-            av_opt_set(ost->enc_ctx->priv_data, "gen_global_headers", "on", 0);
-        }
-
         ret = av_opt_set_dict2(ost->enc_ctx, &encoder_opts, AV_OPT_SEARCH_CHILDREN);
         if (ret < 0) {
             av_log(ost, AV_LOG_ERROR, "Error applying encoder options: %s\n",
@@ -1496,6 +1485,12 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
     if (oc->oformat->flags & AVFMT_GLOBALHEADER && ost->enc_ctx)
         ost->enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+    // NETINT: save extension type to handle sequence change of mp4 and mov
+    if((!strcmp(oc->oformat->name, "mp4") ||
+        !strcmp(oc->oformat->name, "mov")) &&
+        ost->enc_ctx)
+        ost->enc_ctx->flags |= AV_CODEC_FLAG_MP4_MOV;
 
     opt_match_per_stream_int(ost, &o->copy_initial_nonkeyframes,
                              oc, st, &ms->copy_initial_nonkeyframes);

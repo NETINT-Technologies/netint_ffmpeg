@@ -187,8 +187,8 @@ static int hwupload_filter_frame(AVFilterLink *link, AVFrame *input)
     int err;
 
     AVFilterLink  *inlink = avctx->inputs[0];
-    av_log(avctx, AV_LOG_TRACE, "%s: ready %u inlink framequeue %u outlink framequeue %u\n",
-        __func__, avctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_queued_frames(outlink));
+    av_log(avctx, AV_LOG_TRACE, "%s: inlink framequeue %lu outlink framequeue %lu\n",
+        __func__, ff_inlink_queued_frames(inlink), ff_inlink_queued_frames(outlink));
 
     if (input->format == outlink->format)
         return ff_filter_frame(outlink, input);
@@ -261,8 +261,8 @@ static int activate(AVFilterContext *ctx)
     // Forward the status on output link to input link, if the status is set, discard all queued frames
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
-    av_log(ctx, AV_LOG_TRACE, "%s: ready %u inlink framequeue %u outlink framequeue %u\n",
-        __func__, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_queued_frames(outlink));
+    av_log(ctx, AV_LOG_TRACE, "%s: inlink framequeue %lu outlink framequeue %lu\n",
+        __func__, ff_inlink_queued_frames(inlink), ff_inlink_queued_frames(outlink));
 
     if (ff_inlink_check_available_frame(inlink))
     {
@@ -279,8 +279,8 @@ static int activate(AVFilterContext *ctx)
                 }
                 else if (ret < 0)
                 {
-                    av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %u available_frame %d outlink framequeue %u frame_wanted %d - return NOT READY\n",
-                       __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+                    av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                       __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
                     return FFERROR_NOT_READY;
                 }
             }

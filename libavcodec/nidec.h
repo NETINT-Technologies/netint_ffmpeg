@@ -42,6 +42,67 @@
 
 #include "nicodec.h"
 
+#if LIBAVCODEC_VERSION_MAJOR >= 60
+typedef struct OpaqueData {
+    int64_t pkt_pos;
+    void *opaque;
+    AVBufferRef *opaque_ref;
+} OpaqueData;
+#endif
+
+typedef struct XCoderDecContext {
+    AVClass *avclass;
+
+    /* from the command line, which resource allocation method we use */
+    char *dev_xcoder;
+    char *dev_xcoder_name;          /* dev name of the xcoder card to use */
+    char *blk_xcoder_name;          /* blk name of the xcoder card to use */
+    int dev_dec_idx;                /* user-specified decoder index */
+    char *dev_blk_name;             /* user-specified decoder block device name */
+    int keep_alive_timeout;         /* keep alive timeout setting */
+    ni_device_context_t *rsrc_ctx;  /* resource management context */
+
+    ni_session_context_t api_ctx;
+    ni_xcoder_params_t api_param;
+    ni_session_data_io_t api_pkt;
+
+    AVPacket buffered_pkt;
+    AVPacket lone_sei_pkt;
+
+    // stream header copied/saved from AVCodecContext.extradata
+    int got_first_key_frame;
+    uint8_t *extradata;
+    int extradata_size;
+
+    int64_t current_pts;
+    unsigned long long offset;
+    int svct_skip_next_packet;
+
+    int started;
+    int draining;
+    int flushing;
+    int is_lone_sei_pkt;
+    int eos;
+    AVHWFramesContext    *frames;
+
+#if LIBAVCODEC_VERSION_MAJOR >= 60
+    /* for temporarily storing the opaque pointers when AV_CODEC_FLAG_COPY_OPAQUE is set */
+    OpaqueData *opaque_data_array;
+    int opaque_data_nb;
+    int opaque_data_pos;
+#endif
+
+    /* below are all command line options */
+    char *xcoder_opts;
+    int enable_user_data_sei_passthru;
+    int custom_sei_type;
+    int low_delay;
+    int pkt_nal_bitmap;
+    int timecode_passthru;
+
+    H264ParamSets ps;
+} XCoderDecContext;
+
 #define OFFSETDEC(x) offsetof(XCoderDecContext, x)
 #define VD           AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
 
@@ -78,21 +139,22 @@
       OFFSETDEC(enable_user_data_sei_passthru), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD, "user_data_sei_passthru"}, \
     \
     { "custom_sei_passthru", "Specify a custom SEI type to passthrough.", \
-      OFFSETDEC(custom_sei_type), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 254, VD, "custom_sei_passthru"}
+      OFFSETDEC(custom_sei_type), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 254, VD, "custom_sei_passthru"}, \
+    \
+    { "timecode_passthru", "Enable passthrough of time code in picture timing / time code SEI if present.", \
+      OFFSETDEC(timecode_passthru), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD, "timecode_passthru"}
 
 #define NI_DEC_OPTION_LOW_DELAY\
     { "low_delay", "Enable low delay decoding mode for 1 in, 1 out decoding sequence. " \
       "Set 1 to enable low delay mode. Should be used only for streams that are in sequence.", \
       OFFSETDEC(low_delay), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, VD, "low_delay"}
 
-int xcoder_decode_close(AVCodecContext *avctx);
+int ff_xcoder_decode_close(AVCodecContext *avctx);
 
-int xcoder_decode_init(AVCodecContext *avctx);
+int ff_xcoder_decode_init(AVCodecContext *avctx);
 
-int xcoder_decode_reset(AVCodecContext *avctx);
+int ff_xcoder_receive_frame(AVCodecContext *avctx, AVFrame *frame);
 
-int xcoder_receive_frame(AVCodecContext *avctx, AVFrame *frame);
-
-void xcoder_decode_flush(AVCodecContext *avctx);
+void ff_xcoder_decode_flush(AVCodecContext *avctx);
 
 #endif /* AVCODEC_NIDEC_H */

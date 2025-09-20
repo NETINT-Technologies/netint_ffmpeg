@@ -47,6 +47,16 @@
 #include "encode.h"
 #endif
 
+static bool free_frames_isempty(XCoderEncContext *ctx);
+
+static bool free_frames_isfull(XCoderEncContext *ctx);
+
+static int deq_free_frames(XCoderEncContext *ctx);
+
+static int enq_free_frames(XCoderEncContext *ctx, int idx);
+
+static int recycle_index_2_avframe_index(XCoderEncContext *ctx, uint32_t recycleIndex);
+
 static bool gop_params_check(AVDictionary *dict, AVCodecContext *avctx)
 {
     XCoderEncContext *s = avctx->priv_data;
@@ -72,7 +82,7 @@ static int xcoder_encoder_headers(AVCodecContext *avctx)
     int linesize_aligned, height_aligned;
     int ret, recv;
 
-    ctx = malloc(sizeof(XCoderEncContext));
+    ctx = av_malloc(sizeof(XCoderEncContext));
     if (!ctx) {
         return AVERROR(ENOMEM);
     }
@@ -207,8 +217,7 @@ end:
     p_param->cfg_enc_params.conf_win_right  = orig_conf_win_right;
     p_param->cfg_enc_params.conf_win_bottom = orig_conf_win_bottom;
 
-    free(ctx);
-    ctx = NULL;
+    av_freep(&ctx);
 
     return ret;
 }
@@ -697,7 +706,7 @@ static int xcoder_setup_encoder(AVCodecContext *avctx)
         s->api_ctx.max_nvme_io_size = s->nvme_io_size;
         av_log(avctx, AV_LOG_VERBOSE, "Custom NVME IO Size set to = %u\n",
                s->api_ctx.max_nvme_io_size);
-        printf("Encoder user specified NVMe IO Size set to: %u\n",
+        av_log(avctx, AV_LOG_INFO, "Encoder user specified NVMe IO Size set to: %u\n",
                s->api_ctx.max_nvme_io_size);
     }
 
@@ -785,7 +794,7 @@ static int xcoder_setup_encoder(AVCodecContext *avctx)
 
     // generate encoded bitstream headers in advance if configured to do so
     if ((avctx->codec_id != AV_CODEC_ID_MJPEG) &&
-        (pparams->generate_enc_hdrs || s->gen_global_headers || // pparams->generate_enc_hdrs will be deprecated in v5.3.0
+        (pparams->generate_enc_hdrs || (s->gen_global_headers == GEN_GLOBAL_HEADERS_ON) || // pparams->generate_enc_hdrs will be deprecated in v5.3.0
          ((avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER) &&
           (s->gen_global_headers == GEN_GLOBAL_HEADERS_AUTO)))) {
         ret = xcoder_encoder_headers(avctx);
@@ -807,7 +816,7 @@ static int xcoder_setup_encoder(AVCodecContext *avctx)
     return ret;
 }
 
-av_cold int xcoder_encode_init(AVCodecContext *avctx)
+av_cold int ff_xcoder_encode_init(AVCodecContext *avctx)
 {
     XCoderEncContext *ctx = avctx->priv_data;
     AVHWFramesContext *avhwf_ctx;
@@ -823,7 +832,7 @@ av_cold int xcoder_encode_init(AVCodecContext *avctx)
     }
 
     if ((ret = xcoder_setup_encoder(avctx)) < 0) {
-        xcoder_encode_close(avctx);
+        ff_xcoder_encode_close(avctx);
         return ret;
     }
 
@@ -837,20 +846,13 @@ av_cold int xcoder_encode_init(AVCodecContext *avctx)
     return 0;
 }
 
-int xcoder_encode_close(AVCodecContext *avctx)
+int ff_xcoder_encode_close(AVCodecContext *avctx)
 {
     XCoderEncContext *ctx = avctx->priv_data;
     ni_retcode_t ret = NI_RETCODE_FAILURE;
     int i;
 
     for (i = 0; i < MAX_NUM_FRAMEPOOL_HWAVFRAME; i++) {
-        AVFrame *frame = NULL;
-        frame = ctx->sframe_pool[i];
-        if (frame && frame->data[3]) {
-            ((niFrameSurface1_t *)((uint8_t *)frame->data[3]))->device_handle =
-                (int32_t)((int64_t)(ctx->api_ctx.blk_io_handle) &
-                          0xFFFFFFFF); // update handle to most recent alive
-        }
         av_frame_free(&(ctx->sframe_pool[i])); //any remaining stored AVframes that have not been unref will die here
         ctx->sframe_pool[i] = NULL;
     }
@@ -912,13 +914,8 @@ int xcoder_encode_close(AVCodecContext *avctx)
     ni_rsrc_free_device_context(ctx->rsrc_ctx);
     ctx->rsrc_ctx = NULL;
 
-    if (ctx->av_rois)
-        free(ctx->av_rois);
-    ctx->av_rois = NULL;
-    if (ctx->p_spsPpsHdr) {
-        free(ctx->p_spsPpsHdr);
-        ctx->p_spsPpsHdr = NULL;
-    }
+    ni_memfree(ctx->av_rois);
+    av_freep(&ctx->p_spsPpsHdr);
 
     if (avctx->hw_device_ctx) {
         av_buffer_unref(&avctx->hw_device_ctx);
@@ -928,7 +925,7 @@ int xcoder_encode_close(AVCodecContext *avctx)
     return 0;
 }
 
-int xcoder_encode_sequence_change(AVCodecContext *avctx, int width, int height, int bit_depth_factor)
+static int xcoder_encode_sequence_change(AVCodecContext *avctx, int width, int height, int bit_depth_factor)
 {
     XCoderEncContext *ctx = avctx->priv_data;
     ni_retcode_t ret = NI_RETCODE_FAILURE;
@@ -1013,8 +1010,8 @@ int xcoder_encode_sequence_change(AVCodecContext *avctx, int width, int height, 
 static int xcoder_encode_reset(AVCodecContext *avctx)
 {
     av_log(avctx, AV_LOG_WARNING, "XCoder encode reset\n");
-    xcoder_encode_close(avctx);
-    return xcoder_encode_init(avctx);
+    ff_xcoder_encode_close(avctx);
+    return ff_xcoder_encode_init(avctx);
 }
 
 // frame fifo operations
@@ -1109,7 +1106,7 @@ static int enqueue_frame(AVCodecContext *avctx, const AVFrame *inframe)
     return ret;
 }
 
-int xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame)
+int ff_xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame)
 {
     XCoderEncContext *ctx = avctx->priv_data;
     bool ishwframe;
@@ -1140,6 +1137,8 @@ int xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame)
     uint8_t cc_data[NI_MAX_SEI_DATA];
     uint8_t udu_data[NI_MAX_SEI_DATA];
     uint8_t hdrp_data[NI_MAX_SEI_DATA];
+    ni_timecode_t timecode = {0};
+    int timecode_found = 0;
 
     av_log(avctx, AV_LOG_VERBOSE, "XCoder send frame\n");
 
@@ -1291,7 +1290,7 @@ int xcoder_send_frame(AVCodecContext *avctx, const AVFrame *frame)
             0 == strcmp(ctx->api_ctx.blk_dev_name, "")) {
             ctx->api_ctx.hw_id = ni_get_cardno(first_frame);
             av_log(avctx, AV_LOG_VERBOSE,
-                   "xcoder_send_frame: hw_id -1, empty blk_dev_name, collocated "
+                   "ff_xcoder_send_frame: hw_id -1, empty blk_dev_name, collocated "
                    "to %d\n",
                    ctx->api_ctx.hw_id);
         }
@@ -1512,7 +1511,7 @@ resend:
               ctx->buffered_fme.width != avctx->width)) ||
             bit_depth != ctx->api_ctx.bit_depth_factor) {
             av_log(avctx, AV_LOG_INFO,
-                   "xcoder_send_frame resolution change %dx%d "
+                   "ff_xcoder_send_frame resolution change %dx%d "
                    "-> %dx%d or bit depth change %d -> %d\n",
                    avctx->width, avctx->height, ctx->buffered_fme.width,
                    ctx->buffered_fme.height, ctx->api_ctx.bit_depth_factor,
@@ -1850,7 +1849,7 @@ resend:
     }
 
     av_log(avctx, AV_LOG_TRACE,
-           "xcoder_send_frame: #%" PRIu64 " ni_pict_type %d"
+           "ff_xcoder_send_frame: #%" PRIu64 " ni_pict_type %d"
            " forced_header_enable %d intraPeriod %d\n",
            ctx->api_ctx.frame_num, ctx->api_fme.data.frame.ni_pict_type,
            p_param->cfg_enc_params.forced_header_enable,
@@ -1882,13 +1881,12 @@ resend:
         // well and cause memory leak. So check the last pkt_custom_sei_set has
         // been released or not.
         dst_custom_sei_set = ctx->api_ctx.pkt_custom_sei_set[local_pts % NI_FIFO_SZ];
-        if (dst_custom_sei_set) {
-            free(dst_custom_sei_set);
-        }
+        ni_memfree(dst_custom_sei_set);
+        ctx->api_ctx.pkt_custom_sei_set[local_pts % NI_FIFO_SZ] = NULL;
 
         /* copy the whole SEI data */
         src_custom_sei_set = (ni_custom_sei_set_t *)side_data->data;
-        dst_custom_sei_set = malloc(sizeof(ni_custom_sei_set_t));
+        dst_custom_sei_set = malloc(sizeof(ni_custom_sei_set_t)); // libxcoder uses malloc() and free()
         if (dst_custom_sei_set == NULL) {
             av_log(avctx, AV_LOG_ERROR, "failed to allocate memory for custom sei data\n");
             ret = AVERROR(ENOMEM);
@@ -1903,6 +1901,18 @@ resend:
             sei_size = p_src_custom_sei->size;
             sei_type = p_src_custom_sei->type;
             p_src_sei_data = &p_src_custom_sei->data[0];
+
+            // When timecode passthru is enabled, the picture timing / time code SEI
+            // has been parsed by the decoder already and sent as special SEI type (240)
+            // Here we just need to read it out as ni_timecode_t data and skip putting
+            // the data in custom SEI FIFO so that it won't be appended directly
+            if (ctx->timecode_passthru) {
+                if (sei_type == 240) {
+                    memcpy(&timecode, p_src_sei_data, sizeof(ni_timecode_t));
+                    timecode_found = 1;
+                    continue;
+                }
+            }
 
             p_dst_custom_sei = &dst_custom_sei_set->custom_sei[i];
             p_dst_sei_data = &p_dst_custom_sei->data[0];
@@ -1941,11 +1951,9 @@ resend:
             }
 
             if (j != sei_size) {
-                av_log(avctx, AV_LOG_WARNING, "%s: sei RBSP size out of limit(%d), "
+                av_log(avctx, AV_LOG_WARNING, "%s: trimming sei with RBSP size out of limit(%d), "
                        "idx=%u, type=%u, size=%d, custom_sei_loc=%d.\n", __func__,
                        NI_MAX_CUSTOM_SEI_DATA, i, sei_type, sei_size, p_src_custom_sei->location);
-                free(dst_custom_sei_set);
-                break;
             }
 
             // trailing byte
@@ -1956,19 +1964,68 @@ resend:
             p_dst_custom_sei->location = p_src_custom_sei->location;
             av_log(avctx, AV_LOG_TRACE, "%s: custom sei idx %d type %u len %d loc %d.\n",
                    __func__, i, sei_type, size, p_dst_custom_sei->location);
+
+            dst_custom_sei_set->count++;
         }
 
-        dst_custom_sei_set->count = src_custom_sei_set->count;
         ctx->api_ctx.pkt_custom_sei_set[local_pts % NI_FIFO_SZ] = dst_custom_sei_set;
         av_log(avctx, AV_LOG_TRACE, "%s: sei number %d pts %" PRId64 ".\n",
                __func__, dst_custom_sei_set->count, local_pts);
     }
 
+    if (ctx->timecode_passthru) {
+        // Check for time code from SW decoder
+        side_data = av_frame_get_side_data(&ctx->buffered_fme, AV_FRAME_DATA_S12M_TIMECODE);
+        if (side_data && side_data->size > 0) {
+            uint32_t *tc_data = (uint32_t *)side_data->data;
+            if ((tc_data[0] & 3) == 0) {
+                av_log(avctx, AV_LOG_VERBOSE, "num_clock_ts provided in time code is 0, no SEI will be inserted");
+            } else {
+                if ((tc_data[0] & 3) > 1) {
+                    av_log(avctx, AV_LOG_VERBOSE, "num_clock_ts provided in time code > 1, only the first time code will be inserted");
+                }
+                timecode.nuit_field_based_flag = 1;
+                timecode.counting_type = 0;
+                timecode.full_timestamp_flag = 1;
+                timecode.discontinuity_flag = 0;
+                timecode.cnt_dropped_flag = (tc_data[1] >> 30) & 1;
+                timecode.n_frames = (tc_data[1] >> 24) & 0xf;
+                timecode.n_frames += ((tc_data[1] >> 28) & 0x3) * 10;
+                timecode.seconds_value = (tc_data[1] >> 16) & 0xf;
+                timecode.seconds_value += ((tc_data[1] >> 20) & 0x7) * 10;
+                timecode.minutes_value = (tc_data[1] >> 8) & 0xf;
+                timecode.minutes_value += ((tc_data[1] >> 12) & 0x7) * 10;
+                timecode.hours_value = tc_data[1] & 0xf;
+                timecode.hours_value += ((tc_data[1] >> 4) & 0x3) * 10;
+                timecode.time_offset_length = 0;
+                timecode.time_offset_value = 0;
+
+                /* Convert frame number from SMPTE timecode to actual value if framerate > 30FPS */
+                if (av_cmp_q(avctx->framerate, (AVRational) {30, 1}) == 1) {
+                    timecode.n_frames *= 2;
+                    if (av_cmp_q(avctx->framerate, (AVRational) {50, 1}) == 0)
+                        timecode.n_frames += (tc_data[1] >> 7) & 1;
+                    else
+                        timecode.n_frames += (tc_data[1] >> 23) & 1;
+                }
+
+                timecode_found = 1;
+            }
+        }
+    }
+
     if (ctx->api_fme.data.frame.sei_total_len > NI_ENC_MAX_SEI_BUF_SIZE) {
-        av_log(avctx, AV_LOG_ERROR, "xcoder_send_frame: sei total length %u exceeds maximum sei size %u.\n",
+        av_log(avctx, AV_LOG_ERROR, "ff_xcoder_send_frame: sei total length %u exceeds maximum sei size %u.\n",
                ctx->api_fme.data.frame.sei_total_len, NI_ENC_MAX_SEI_BUF_SIZE);
         ret = AVERROR(EINVAL);
         return ret;
+    }
+
+    // Maximum length of picture timing / time code SEI that's going to be inserted is 18 bytes
+    // according to the H264/H265 specs. Temporarily add this maximum length to total extra data
+    // length to make sure that the buffer allocated is large enough
+    if (timecode_found) {
+      ctx->api_fme.data.frame.sei_total_len += 18;
     }
 
     ctx->api_fme.data.frame.extra_data_len += ctx->api_fme.data.frame.sei_total_len;
@@ -2008,9 +2065,9 @@ resend:
 
 #if FF_API_PKT_PTS
     // NOLINTNEXTLINE(clang-diagnostic-deprecated-declarations)
-    av_log(avctx, AV_LOG_TRACE, "xcoder_send_frame: pts=%" PRId64 ", pkt_dts=%" PRId64 ", pkt_pts=%" PRId64 "\n", ctx->buffered_fme.pts, ctx->buffered_fme.pkt_dts, ctx->buffered_fme.pkt_pts);
+    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_send_frame: pts=%" PRId64 ", pkt_dts=%" PRId64 ", pkt_pts=%" PRId64 "\n", ctx->buffered_fme.pts, ctx->buffered_fme.pkt_dts, ctx->buffered_fme.pkt_pts);
 #endif
-    av_log(avctx, AV_LOG_TRACE, "xcoder_send_frame: frame->format=%d, frame->width=%d, frame->height=%d, frame->pict_type=%d, size=%d\n", format_in_use, ctx->buffered_fme.width, ctx->buffered_fme.height, ctx->buffered_fme.pict_type, ret);
+    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_send_frame: frame->format=%d, frame->width=%d, frame->height=%d, frame->pict_type=%d, size=%d\n", format_in_use, ctx->buffered_fme.width, ctx->buffered_fme.height, ctx->buffered_fme.pict_type, ret);
     if (ret < 0) {
         return ret;
     }
@@ -2052,7 +2109,7 @@ resend:
                          dst_stride, height_aligned);
 
     av_log(avctx, AV_LOG_TRACE,
-           "xcoder_send_frame frame->width %d "
+           "ff_xcoder_send_frame frame->width %d "
            "ctx->api_ctx.bit_depth_factor %d dst_stride[0/1/2] %d/%d/%d sw_pix_fmt %d\n",
            ctx->buffered_fme.width, ctx->api_ctx.bit_depth_factor,
            dst_stride[0], dst_stride[1], dst_stride[2], avctx->sw_pix_fmt);
@@ -2139,7 +2196,7 @@ resend:
         if (ctx->buffered_fme.format != AV_PIX_FMT_NI_QUAD) {
             av_log(
                 avctx, AV_LOG_TRACE,
-                "xcoder_send_frame: fme.data_len[0]=%d, "
+                "ff_xcoder_send_frame: fme.data_len[0]=%d, "
                 "buf_fme->linesize=%d/%d/%d, dst alloc linesize = %d/%d/%d, "
                 "src height = %d/%d/%d, dst height aligned = %d/%d/%d, "
                 "force_key_frame=%d, extra_data_len=%d sei_size=%d "
@@ -2182,7 +2239,7 @@ resend:
             niFrameSurface1_t *src_surf;
 
             av_log(avctx, AV_LOG_DEBUG,
-                   "xcoder_send_frame:Autodownload to be run: hdl: %d w: %d h: %d\n",
+                   "ff_xcoder_send_frame:Autodownload to be run: hdl: %d w: %d h: %d\n",
                    ctx->api_ctx.auto_dl_handle, avctx->width, avctx->height);
             avhwf_ctx =
                 (AVHWFramesContext *)ctx->buffered_fme.hw_frames_ctx->data;
@@ -2241,6 +2298,14 @@ resend:
                          ctx->api_ctx.codec_format, mdcv_data, cll_data,
                          cc_data, udu_data, hdrp_data, ishwframe, isnv12frame);
 
+    if (timecode_found) {
+        // Subtract the maximum length temporarily added earlier
+        // ni_enc_insert_timecode will calculate the actual length and add to these values
+        ctx->api_fme.data.frame.sei_total_len -= 18;
+        ctx->api_fme.data.frame.extra_data_len -= 18;
+        ni_enc_insert_timecode(&ctx->api_ctx, &ctx->api_fme.data.frame, &timecode);
+    }
+
     ni_frame_buffer_free(&dec_frame);
 
     // end of encode input frame data layout
@@ -2249,17 +2314,17 @@ resend:
 
     sent = ni_device_session_write(&ctx->api_ctx, &ctx->api_fme, NI_DEVICE_TYPE_ENCODER);
 
-    av_log(avctx, AV_LOG_DEBUG, "xcoder_send_frame: size %d sent to xcoder\n", sent);
+    av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_send_frame: size %d sent to xcoder\n", sent);
 
     // return EIO at error
     if (NI_RETCODE_ERROR_VPU_RECOVERY == sent) {
         sent = xcoder_encode_reset(avctx);
         if (sent < 0) {
-            av_log(avctx, AV_LOG_ERROR, "xcoder_send_frame(): VPU recovery failed:%d, returning EIO\n", sent);
+            av_log(avctx, AV_LOG_ERROR, "ff_xcoder_send_frame(): VPU recovery failed:%d, returning EIO\n", sent);
             ret = AVERROR(EIO);
         }
     } else if (sent < 0) {
-        av_log(avctx, AV_LOG_ERROR, "xcoder_send_frame(): failure sent (%d) , "
+        av_log(avctx, AV_LOG_ERROR, "ff_xcoder_send_frame(): failure sent (%d) , "
                "returning EIO\n", sent);
         ret = AVERROR(EIO);
 
@@ -2273,7 +2338,7 @@ resend:
         }
         return ret;
     } else {
-        av_log(avctx, AV_LOG_DEBUG, "xcoder_send_frame(): sent (%d)\n", sent);
+        av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_send_frame(): sent (%d)\n", sent);
         if (sent == 0) {
             // case of sequence change in progress
             if (ctx->api_fme.data.frame.start_of_stream &&
@@ -2291,11 +2356,11 @@ resend:
                 ishwframe = ctx->buffered_fme.format == AV_PIX_FMT_NI_QUAD;
                 if (ishwframe) {
                     // Do not queue frames to avoid FFmpeg stuck when multiple HW frames are queued up in nienc, causing decoder unable to acquire buffer, which led to FFmpeg stuck
-                    av_log(avctx, AV_LOG_ERROR, "xcoder_send_frame(): device WRITE_BUFFER_FULL cause HW frame drop! (approx. Frame num #%" PRIu64 "\n", ctx->api_ctx.frame_num);
+                    av_log(avctx, AV_LOG_ERROR, "ff_xcoder_send_frame(): device WRITE_BUFFER_FULL cause HW frame drop! (approx. Frame num #%" PRIu64 "\n", ctx->api_ctx.frame_num);
                     av_frame_unref(&ctx->buffered_fme);
                     ret = 1;
                 } else {
-                    av_log(avctx, AV_LOG_DEBUG, "xcoder_send_frame(): Write buffer full, enqueue frame and return 0\n");
+                    av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_send_frame(): Write buffer full, enqueue frame and return 0\n");
                     ret = 0;
 
                     if (frame && is_input_fifo_empty(ctx)) {
@@ -2340,7 +2405,7 @@ resend:
                                ->ui16FrameIdx);
                     av_log(
                         avctx, AV_LOG_TRACE,
-                        "xcoder_send_frame: after ref sframe_pool, hw frame "
+                        "ff_xcoder_send_frame: after ref sframe_pool, hw frame "
                         "av_buffer_get_ref_count=%d, data[3]=%p\n",
                         av_buffer_get_ref_count(
                             ctx->sframe_pool[ctx->aFree_Avframes_list[ctx->freeHead]]
@@ -2375,9 +2440,9 @@ resend:
                             (ctx->api_ctx.auto_dl_handle == 0);
                 if (ishwframe) {
                     if (ctx->buffered_fme.buf[0])
-                        av_log(avctx, AV_LOG_TRACE, "xcoder_send_frame: after unref buffered_fme, hw frame av_buffer_get_ref_count=%d\n", av_buffer_get_ref_count(ctx->buffered_fme.buf[0]));
+                        av_log(avctx, AV_LOG_TRACE, "ff_xcoder_send_frame: after unref buffered_fme, hw frame av_buffer_get_ref_count=%d\n", av_buffer_get_ref_count(ctx->buffered_fme.buf[0]));
                     else
-                        av_log(avctx, AV_LOG_TRACE, "xcoder_send_frame: after unref buffered_fme, hw frame av_buffer_get_ref_count=0 (buf[0] is NULL)\n");
+                        av_log(avctx, AV_LOG_TRACE, "ff_xcoder_send_frame: after unref buffered_fme, hw frame av_buffer_get_ref_count=0 (buf[0] is NULL)\n");
                 }
             } else {
                 av_log(avctx, AV_LOG_TRACE, "XCoder frame(eos) sent, sequence changing!"
@@ -2416,12 +2481,25 @@ resend:
     }
 
     if (ctx->encoder_flushing) {
-        av_log(avctx, AV_LOG_DEBUG, "xcoder_send_frame flushing ..\n");
+        av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_send_frame flushing ..\n");
         ret = ni_device_session_flush(&ctx->api_ctx, NI_DEVICE_TYPE_ENCODER);
     }
 
     av_log(avctx, AV_LOG_VERBOSE, "XCoder send frame return %d \n", ret);
     return ret;
+}
+
+static void get_luma_size(int width, int height, int bit_depth, int *luma_size, int *luma_size_4n)
+{
+    int width_4n, height_4n;
+
+    width_4n = ((width + 15) / 16) * 4;
+    width = FFALIGN(width, 64);
+    height = FFALIGN(height, 64);
+    height_4n = height / 4;
+
+    *luma_size = FFALIGN(width * 4 * bit_depth / 8, 64) * height / 4;
+    *luma_size_4n = FFALIGN(width_4n * 4 * bit_depth / 8, 64) * height_4n / 4;
 }
 
 static int xcoder_encode_reinit(AVCodecContext *avctx)
@@ -2435,7 +2513,7 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
     char tmp_blk_dev_name[NI_MAX_DEVICE_NAME_LEN];
     int bit_depth = 1;
     int pix_fmt = AV_PIX_FMT_YUV420P;
-    int stride, ori_stride;
+    int stride, luma_size, luma_size_4n, ori_stride, ori_luma_size, ori_luma_size_4n;
     bool bIsSmallPicture = false;
     AVFrame temp_frame;
     ni_xcoder_params_t *p_param = &ctx->api_param;
@@ -2557,10 +2635,7 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
     ctx->firstPktArrived = 0;
     ctx->spsPpsArrived = 0;
     ctx->spsPpsHdrLen = 0;
-    if (ctx->p_spsPpsHdr) {
-        free(ctx->p_spsPpsHdr);
-        ctx->p_spsPpsHdr = NULL;
-    }
+    av_freep(&ctx->p_spsPpsHdr);
     ctx->seqChangeCount++;
 
     // check if resolution is zero copy compatible and set linesize according to new resolution
@@ -2578,12 +2653,18 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
         ori_stride = FFALIGN(ctx->api_ctx.ori_width*bit_depth, 128);
     }
 
+    get_luma_size(temp_frame.width, temp_frame.height, bit_depth == 2 ? 10 : 8, &luma_size, &luma_size_4n);
+    get_luma_size(ctx->api_ctx.ori_width, ctx->api_ctx.ori_height, ctx->api_ctx.ori_bit_depth_factor == 2 ? 10 : 8,
+                  &ori_luma_size, &ori_luma_size_4n);
+
     if (pix_fmt == NI_PIX_FMT_ARGB
        || pix_fmt == NI_PIX_FMT_ABGR
        || pix_fmt == NI_PIX_FMT_RGBA
        || pix_fmt == NI_PIX_FMT_BGRA) {
         stride = temp_frame.width;
         ori_stride = ctx->api_ctx.ori_width;
+        luma_size = luma_size_4n = temp_frame.width * temp_frame.height;
+        ori_luma_size = ori_luma_size_4n = ctx->api_ctx.ori_width * ctx->api_ctx.ori_height;
     }
 
     if (ctx->api_param.cfg_enc_params.lookAheadDepth
@@ -2623,13 +2704,14 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
     av_log(avctx, AV_LOG_INFO, "%s resolution "
            "changing %dx%d -> %dx%d "
            "format %d -> %d "
-           "original stride %d height %d pix fmt %d "
-           "new stride %d height %d pix fmt %d \n",
+           "original stride %d height %d luma size %d/%d pix fmt %d "
+           "new stride %d height %d luma size %d/%d pix fmt %d \n",
            __func__, avctx->width, avctx->height,
            temp_frame.width, temp_frame.height,
            avctx->pix_fmt, temp_frame.format,
-           ori_stride, ctx->api_ctx.ori_height, ctx->api_ctx.ori_pix_fmt,
-           stride, temp_frame.height, pix_fmt);
+           ori_stride, ctx->api_ctx.ori_height,
+           ori_luma_size, ori_luma_size_4n, ctx->api_ctx.ori_pix_fmt,
+           stride, temp_frame.height, luma_size, luma_size_4n, pix_fmt);
 
     avctx->width = temp_frame.width;
     avctx->height = temp_frame.height;
@@ -2637,12 +2719,13 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
 
     // fast sequence change without close / open only if new resolution < original resolution
     if ((ori_stride*ctx->api_ctx.ori_height < stride*temp_frame.height) ||
+        (ori_luma_size < luma_size) || (ori_luma_size_4n < luma_size_4n) ||
         (ctx->api_ctx.ori_pix_fmt != pix_fmt) ||
         bIsSmallPicture ||
         (avctx->codec_id == AV_CODEC_ID_MJPEG) ||
         ctx->api_param.cfg_enc_params.disable_adaptive_buffers) {
-        xcoder_encode_close(avctx);
-        ret = xcoder_encode_init(avctx);
+        ff_xcoder_encode_close(avctx);
+        ret = ff_xcoder_encode_init(avctx);
         // clear crop parameters upon sequence change because cropping values may not be compatible to new resolution
         // (except for Motion Constrained mode 2, for which we crop to 64x64 alignment)
         if (ctx->api_param.cfg_enc_params.motionConstrainedMode == MOTION_CONSTRAINED_QUALITY_MODE && avctx->codec_id == AV_CODEC_ID_HEVC) {
@@ -2684,7 +2767,7 @@ static int xcoder_encode_reinit(AVCodecContext *avctx)
     return ret;
 }
 
-int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
+int ff_xcoder_receive_packet2(AVCodecContext *avctx, AVPacket *pkt)
 {
     XCoderEncContext *ctx = avctx->priv_data;
     int i, ret = 0;
@@ -2696,13 +2779,13 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     av_log(avctx, AV_LOG_VERBOSE, "XCoder receive packet\n");
 
     if (ctx->encoder_eof) {
-        av_log(avctx, AV_LOG_VERBOSE, "xcoder_receive_packet: EOS\n");
+        av_log(avctx, AV_LOG_VERBOSE, "ff_xcoder_receive_packet2: EOS\n");
         return AVERROR_EOF;
     }
 
     if (ni_packet_buffer_alloc(xpkt, NI_MAX_TX_SZ)) {
         av_log(avctx, AV_LOG_ERROR,
-               "xcoder_receive_packet: packet buffer size %d allocation failed\n",
+               "ff_xcoder_receive_packet2: packet buffer size %d allocation failed\n",
                NI_MAX_TX_SZ);
         return AVERROR(ENOMEM);
     }
@@ -2730,16 +2813,16 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 if (SESSION_RUN_STATE_SEQ_CHANGE_DRAINING ==
                     ctx->api_ctx.session_run_state) {
                     // after sequence change completes, reset codec state
-                    av_log(avctx, AV_LOG_INFO, "xcoder_receive_packet 1: sequence "
+                    av_log(avctx, AV_LOG_INFO, "ff_xcoder_receive_packet2 1: sequence "
                            "change completed, return AVERROR(EAGAIN) and will reopen "
                            "codec!\n");
 
                     ret = xcoder_encode_reinit(avctx);
-                    av_log(avctx, AV_LOG_DEBUG, "xcoder_receive_packet: xcoder_encode_reinit ret %d\n", ret);
+                    av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_receive_packet2: xcoder_encode_reinit ret %d\n", ret);
                     if (ret >= 0) {
                         ret = AVERROR(EAGAIN);
 
-                        xcoder_send_frame(avctx, NULL);
+                        ff_xcoder_send_frame(avctx, NULL);
 
                         ctx->api_ctx.session_run_state = SESSION_RUN_STATE_NORMAL;
                     }
@@ -2747,7 +2830,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 }
 
                 ret = AVERROR_EOF;
-                av_log(avctx, AV_LOG_VERBOSE, "xcoder_receive_packet: got encoder_eof, return AVERROR_EOF\n");
+                av_log(avctx, AV_LOG_VERBOSE, "ff_xcoder_receive_packet2: got encoder_eof, return AVERROR_EOF\n");
                 break;
             } else {
                 bool bIsReset = false;
@@ -2761,7 +2844,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 }
                 ret = AVERROR(EAGAIN);
                 if ((!ctx->encoder_flushing && !ctx->eos_fme_received) || bIsReset) { // if encode session was reset, can't read again with invalid session, must break out first
-                    av_log(avctx, AV_LOG_TRACE, "xcoder_receive_packet: NOT encoder_"
+                    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_receive_packet2: NOT encoder_"
                            "flushing, NOT eos_fme_received, return AVERROR(EAGAIN)\n");
                     break;
                 }
@@ -2785,28 +2868,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 av_log(avctx, AV_LOG_VERBOSE, "UNREF trace ui16FrameIdx = [%d].\n",
                        xpkt->recycle_index);
                 if (avframe_index >= 0 && ctx->sframe_pool[avframe_index]) {
-                    frame = ctx->sframe_pool[avframe_index];
-                    niFrameSurface1_t *ni_frame = (niFrameSurface1_t *)((uint8_t *)frame->data[3]);
-                    ni_device_handle_t device_handle = (ni_device_handle_t) ni_frame->device_handle;
-
-                    ni_frame->device_handle =
-                        (int32_t)((int64_t)(ctx->api_ctx.blk_io_handle) &
-                                  0xFFFFFFFF); // update handle to most recent alive
-
                     av_frame_unref(ctx->sframe_pool[avframe_index]);
-
-                    // restore the original handler if (ref_cnt - 1) > 0
-                    if (frame->buf[0]) {
-                        int ref_cnt = av_buffer_get_ref_count(frame->buf[0]);
-                        if (ref_cnt > 0) {
-                            ni_frame->device_handle =
-                                (int32_t)((int64_t)(device_handle) & 0xFFFFFFFF);
-                            av_log(avctx, AV_LOG_DEBUG,
-                                   "restore the original handler 0x%x\n",
-                                   device_handle);
-                        }
-                    }
-
                     av_log(avctx, AV_LOG_DEBUG,
                            "AVframe_index = %d pushed to free tail %d\n",
                            avframe_index, ctx->freeTail);
@@ -2824,7 +2886,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 ret = AVERROR(EAGAIN);
                 ctx->spsPpsArrived = 1;
                 ctx->spsPpsHdrLen = recv - meta_size;
-                ctx->p_spsPpsHdr = malloc(ctx->spsPpsHdrLen);
+                ctx->p_spsPpsHdr = av_malloc(ctx->spsPpsHdrLen);
                 if (!ctx->p_spsPpsHdr) {
                     ret = AVERROR(ENOMEM);
                     break;
@@ -2853,9 +2915,14 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                     ctx->latest_dts = xpkt->pts;
                 } else if (ctx->total_frames_received < ctx->dtsOffset) {
                     // guess dts
+#if LIBAVCODEC_VERSION_MAJOR < 62
                     ctx->latest_dts = ctx->first_frame_pts +
                                       ((ctx->gop_offset_count - ctx->dtsOffset) *
                                        avctx->ticks_per_frame);
+#else
+                    ctx->latest_dts = ctx->first_frame_pts +
+                                      ctx->gop_offset_count - ctx->dtsOffset;
+#endif
                     ctx->gop_offset_count++;
                 } else {
                     // get dts from pts FIFO
@@ -2870,7 +2937,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 ctx->total_frames_received++;
 
                 if (!ctx->encoder_flushing && !ctx->eos_fme_received) {
-                    av_log(avctx, AV_LOG_TRACE, "xcoder_receive_packet: skip"
+                    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_receive_packet2: skip"
                            " picture output, return AVERROR(EAGAIN)\n");
                     break;
                 } else {
@@ -2882,7 +2949,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
             if (avctx->codec_id == AV_CODEC_ID_AV1) {
                 av_log(
                     avctx, AV_LOG_TRACE,
-                    "xcoder_receive_packet: AV1 xpkt buf %p size %d show_frame %d\n",
+                    "ff_xcoder_receive_packet2: AV1 xpkt buf %p size %d show_frame %d\n",
                     xpkt->p_data, xpkt->data_len, xpkt->av1_show_frame);
                 if (!xpkt->av1_show_frame) {
                     // store AV1 packets
@@ -2897,28 +2964,28 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                     xpkt->data_len = 0;
                     if (xpkt->av1_buffer_index >= MAX_AV1_ENCODER_GOP_NUM) {
                         av_log(avctx, AV_LOG_ERROR,
-                               "xcoder_receive_packet: recv AV1 not shown frame "
+                               "ff_xcoder_receive_packet2: recv AV1 not shown frame "
                                "number %d >= %d, return AVERROR_EXTERNAL\n",
                                xpkt->av1_buffer_index, MAX_AV1_ENCODER_GOP_NUM);
                         ret = AVERROR_EXTERNAL;
                         break;
                     } else if (!ctx->encoder_flushing && !ctx->eos_fme_received) {
                         av_log(avctx, AV_LOG_TRACE,
-                               "xcoder_receive_packet: recv AV1 not shown frame, "
+                               "ff_xcoder_receive_packet2: recv AV1 not shown frame, "
                                "return AVERROR(EAGAIN)\n");
                         ret = AVERROR(EAGAIN);
                         break;
                     } else {
                         if (ni_packet_buffer_alloc(xpkt, NI_MAX_TX_SZ)) {
                             av_log(avctx, AV_LOG_ERROR,
-                                   "xcoder_receive_packet: AV1 packet buffer size %d "
+                                   "ff_xcoder_receive_packet2: AV1 packet buffer size %d "
                                    "allocation failed during flush\n",
                                    NI_MAX_TX_SZ);
                             ret = AVERROR(ENOMEM);
                             break;
                         }
                         av_log(avctx, AV_LOG_TRACE,
-                               "xcoder_receive_packet: recv AV1 not shown frame "
+                               "ff_xcoder_receive_packet2: recv AV1 not shown frame "
                                "during flush, continue..\n");
                         continue;
                     }
@@ -2983,9 +3050,10 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
 
             if (!ctx->firstPktArrived) {
                 int sizeof_spspps_attached_to_idr = ctx->spsPpsHdrLen;
+                int seq_change_in_mp4_or_mov = (ctx->seqChangeCount > 0) && (avctx->flags & AV_CODEC_FLAG_MP4_MOV);
                 if ((avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER) &&
                     (avctx->codec_id != AV_CODEC_ID_AV1) &&
-                    (ctx->seqChangeCount == 0)) {
+                    (!seq_change_in_mp4_or_mov)) {
                     sizeof_spspps_attached_to_idr = 0;
                 }
                 ctx->firstPktArrived = 1;
@@ -2995,7 +3063,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
 
                 data_len += xpkt->data_len - meta_size + sizeof_spspps_attached_to_idr + total_custom_sei_size;
                 if (avctx->codec_id == AV_CODEC_ID_AV1)
-                    av_log(avctx, AV_LOG_TRACE, "xcoder_receive_packet: AV1 first output pkt size %d\n", data_len);
+                    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_receive_packet2: AV1 first output pkt size %d\n", data_len);
 
 #if (LIBAVCODEC_VERSION_MAJOR >= 59)
                 ret = ff_get_encode_buffer(avctx, pkt, data_len, 0);
@@ -3079,7 +3147,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
             } else {
                 data_len += xpkt->data_len - meta_size + total_custom_sei_size;
                 if (avctx->codec_id == AV_CODEC_ID_AV1)
-                    av_log(avctx, AV_LOG_TRACE, "xcoder_receive_packet: AV1 output pkt size %d\n", data_len);
+                    av_log(avctx, AV_LOG_TRACE, "ff_xcoder_receive_packet2: AV1 output pkt size %d\n", data_len);
 
 #if (LIBAVCODEC_VERSION_MAJOR >= 59)
                 ret = ff_get_encode_buffer(avctx, pkt, data_len, 0);
@@ -3185,7 +3253,7 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
 
             // free buffer
             if (custom_sei_count) {
-                free(p_custom_sei_set);
+                ni_memfree(p_custom_sei_set);
                 ctx->api_ctx.pkt_custom_sei_set[local_pts % NI_FIFO_SZ] = NULL;
             }
 
@@ -3206,9 +3274,13 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                     av_log(avctx, AV_LOG_TRACE, "Packet dts (av1): %ld\n", pkt->dts);
                 } else if (ctx->total_frames_received < ctx->dtsOffset) {
                     // guess dts
+#if LIBAVCODEC_VERSION_MAJOR < 62
                     pkt->dts = ctx->first_frame_pts +
                                ((ctx->gop_offset_count - ctx->dtsOffset) *
                                 avctx->ticks_per_frame);
+#else
+                    pkt->dts = ctx->first_frame_pts + ctx->gop_offset_count - ctx->dtsOffset;
+#endif
                     ctx->gop_offset_count++;
                     av_log(avctx, AV_LOG_TRACE, "Packet dts (guessed): %ld\n",
                            pkt->dts);
@@ -3276,12 +3348,12 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
                 SESSION_RUN_STATE_SEQ_CHANGE_DRAINING ==
                 ctx->api_ctx.session_run_state) {
                 // after sequence change completes, reset codec state
-                av_log(avctx, AV_LOG_DEBUG, "xcoder_receive_packet 2: sequence change "
+                av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_receive_packet2 2: sequence change "
                     "completed, return 0 and will reopen codec !\n");
                 ret = xcoder_encode_reinit(avctx);
-                av_log(avctx, AV_LOG_DEBUG, "xcoder_receive_packet: xcoder_encode_reinit ret %d\n", ret);
+                av_log(avctx, AV_LOG_DEBUG, "ff_xcoder_receive_packet2: xcoder_encode_reinit ret %d\n", ret);
                 if (ret >= 0) {
-                    xcoder_send_frame(avctx, NULL);
+                    ff_xcoder_send_frame(avctx, NULL);
                     ctx->api_ctx.session_run_state = SESSION_RUN_STATE_NORMAL;
                 }
             }
@@ -3292,12 +3364,12 @@ int xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     if ((AV_CODEC_ID_AV1 == avctx->codec_id) && xpkt->av1_buffer_index &&
         av1_output_frame) {
         av_log(avctx, AV_LOG_TRACE,
-               "xcoder_receive_packet: ni_packet_buffer_free_av1 %d packtes\n",
+               "ff_xcoder_receive_packet2: ni_packet_buffer_free_av1 %d packtes\n",
                xpkt->av1_buffer_index);
         ni_packet_buffer_free_av1(xpkt);
     }
 
-    av_log(avctx, AV_LOG_VERBOSE, "xcoder_receive_packet: return %d\n", ret);
+    av_log(avctx, AV_LOG_VERBOSE, "ff_xcoder_receive_packet2: return %d\n", ret);
     return ret;
 }
 
@@ -3311,17 +3383,17 @@ int ff_xcoder_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
 
     ret = ff_encode_get_frame(avctx, frame);
     if (!ctx->encoder_flushing && ret >= 0 || ret == AVERROR_EOF) {
-        ret = xcoder_send_frame(avctx, (ret == AVERROR_EOF ? NULL : frame));
+        ret = ff_xcoder_send_frame(avctx, (ret == AVERROR_EOF ? NULL : frame));
         if (ret < 0 && ret != AVERROR_EOF) {
             av_frame_unref(frame);
             return ret;
         }
     }
     // Once send_frame returns EOF go on receiving packets until EOS is met.
-    return xcoder_receive_packet(avctx, pkt);
+    return ff_xcoder_receive_packet2(avctx, pkt);
 }
 #else
-int xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
+int ff_xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                        const AVFrame *frame, int *got_packet)
 {
     XCoderEncContext *ctx = avctx->priv_data;
@@ -3330,13 +3402,13 @@ int xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     av_log(avctx, AV_LOG_VERBOSE, "XCoder encode frame\n");
 
     if (!ctx->encoder_flushing) {
-        ret = xcoder_send_frame(avctx, frame);
+        ret = ff_xcoder_send_frame(avctx, frame);
         if (ret < 0) {
             return ret;
         }
     }
 
-    ret = xcoder_receive_packet(avctx, pkt);
+    ret = ff_xcoder_receive_packet2(avctx, pkt);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         *got_packet = 0;
     } else if (ret < 0) {
@@ -3349,17 +3421,17 @@ int xcoder_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 }
 #endif
 
-bool free_frames_isempty(XCoderEncContext *ctx)
+static bool free_frames_isempty(XCoderEncContext *ctx)
 {
     return (ctx->freeHead == ctx->freeTail);
 }
 
-bool free_frames_isfull(XCoderEncContext *ctx)
+static bool free_frames_isfull(XCoderEncContext *ctx)
 {
     return (ctx->freeHead == ((ctx->freeTail == MAX_NUM_FRAMEPOOL_HWAVFRAME) ? 0 : ctx->freeTail + 1));
 }
 
-int deq_free_frames(XCoderEncContext *ctx)
+static int deq_free_frames(XCoderEncContext *ctx)
 {
     if (free_frames_isempty(ctx)) {
         return -1;
@@ -3369,7 +3441,7 @@ int deq_free_frames(XCoderEncContext *ctx)
     return 0;
 }
 
-int enq_free_frames(XCoderEncContext *ctx, int idx)
+static int enq_free_frames(XCoderEncContext *ctx, int idx)
 {
     if (free_frames_isfull(ctx)) {
         return -1;
@@ -3379,7 +3451,7 @@ int enq_free_frames(XCoderEncContext *ctx, int idx)
     return 0;
 }
 
-int recycle_index_2_avframe_index(XCoderEncContext *ctx, uint32_t recycleIndex)
+static int recycle_index_2_avframe_index(XCoderEncContext *ctx, uint32_t recycleIndex)
 {
     int i;
     for (i = 0; i < MAX_NUM_FRAMEPOOL_HWAVFRAME; i++) {
@@ -3396,9 +3468,9 @@ int recycle_index_2_avframe_index(XCoderEncContext *ctx, uint32_t recycleIndex)
 const AVCodecHWConfigInternal *ff_ni_enc_hw_configs[] = {
     HW_CONFIG_ENCODER_FRAMES(NI_QUAD,  NI_QUADRA),
     HW_CONFIG_ENCODER_DEVICE(NV12, NI_QUADRA),
-    HW_CONFIG_ENCODER_DEVICE(P010, NI_QUADRA),
+    HW_CONFIG_ENCODER_DEVICE(P010LE, NI_QUADRA),
     HW_CONFIG_ENCODER_DEVICE(YUV420P, NI_QUADRA),
-    HW_CONFIG_ENCODER_DEVICE(YUV420P10, NI_QUADRA),
+    HW_CONFIG_ENCODER_DEVICE(YUV420P10LE, NI_QUADRA),
     NULL,
 };
 #endif

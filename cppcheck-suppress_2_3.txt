@@ -1,7 +1,8 @@
 ConfigurationNotChecked:FFmpeg-n7.1/libavutil/common.h
-knownConditionTrueFalse:FFmpeg-n7.1/libavcodec/put_bits.h:295
+ConfigurationNotChecked:FFmpeg-n7.1/libavcodec/get_bits.h:426
+knownConditionTrueFalse:FFmpeg-n7.1/libavcodec/put_bits.h:296
 missingInclude
-nullPointerArithmetic:FFmpeg-n7.1/libavcodec/get_bits.h:640
+nullPointerArithmetic:FFmpeg-n7.1/libavcodec/get_bits.h:531
 oppositeExpression:FFmpeg-n7.1/libavutil/intmath.h
 shiftTooManyBits:FFmpeg-n7.1/libavcodec/internal.h
 shiftTooManyBitsSigned:FFmpeg-n7.1/libavcodec/get_bits.h
@@ -15,3 +16,5 @@ nullPointerArithmeticRedundantCheck:FFmpeg-n7.1/libavcodec/get_bits.h
 knownConditionTrueFalse:FFmpeg-n7.1/libavfilter/vf_overlay_ni.c
 unreadVariable:FFmpeg-n7.1/libavutil/intfloat.h
 ConfigurationNotChecked:FFmpeg-n7.1/libavcodec/get_bits.h
+unreadVariable:FFmpeg-n7.1/libavcodec/mathops.h
+shadowVariable:FFmpeg-n7.1/libavcodec/ppc/mathops.h

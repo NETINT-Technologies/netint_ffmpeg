@@ -34,6 +34,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #if HAVE_IO_H
 #include <io.h>
@@ -165,12 +166,9 @@ static void cleanup_ai_context(AVFilterContext *ctx, NetIntBgContext *s)
                    retval);
         }
         ni_device_session_context_clear(&ai_ctx->api_ctx);
-        av_free(ai_ctx);
-        s->ai_ctx = NULL;
+        av_freep(&s->ai_ctx);
     }
-    if (s->mask_data) {
-        free(s->mask_data);
-    }
+    av_freep(&s->mask_data);
 }
 
 
@@ -262,14 +260,10 @@ static void ni_destroy_network(ni_roi_network_t *network)
 
         if (network->layers) {
             for (i = 0; i < network->raw.output_num; i++) {
-                if (network->layers[i].output) {
-                    free(network->layers[i].output);
-                    network->layers[i].output = NULL;
-                }
+                av_freep(&network->layers[i].output);
             }
 
-            free(network->layers);
-            network->layers = NULL;
+            av_freep(&network->layers);
         }
     }
 }
@@ -297,7 +291,7 @@ static int ni_create_network(AVFilterContext *ctx, ni_roi_network_t *network)
     }
 
     network->layers =
-        malloc(sizeof(ni_roi_network_layer_t) * ni_network->output_num);
+        av_malloc(sizeof(ni_roi_network_layer_t) * ni_network->output_num);
     if (!network->layers) {
         av_log(ctx, AV_LOG_ERROR, "cannot allocate network layer memory\n");
         return AVERROR(ENOMEM);
@@ -320,7 +314,7 @@ static int ni_create_network(AVFilterContext *ctx, ni_roi_network_t *network)
                        network->layers[i].channel);
 
         network->layers[i].output =
-            malloc(network->layers[i].output_number * sizeof(float));
+            av_malloc(network->layers[i].output_number * sizeof(float));
         if (!network->layers[i].output) {
             av_log(ctx, AV_LOG_ERROR,
                    "failed to allocate network layer %d output buffer\n", i);
@@ -464,6 +458,11 @@ static int init_hwframe_overlay(AVFilterContext *ctx, NetIntBgContext *s,
     if (overlay_ctx->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 
 #if IS_FFMPEG_70_AND_ABOVE
     s->buffer_limit = 1;
@@ -912,7 +911,7 @@ static int ni_bg_config_input(AVFilterContext *ctx, AVFrame *frame)
         goto fail_out;
     }
 
-    s->mask_data = malloc(s->network.netw * s->network.neth * sizeof(uint8_t));
+    s->mask_data = av_malloc(s->network.netw * s->network.neth * sizeof(uint8_t));
 
     if (!s->mask_data) {
         av_log(ctx, AV_LOG_ERROR, "cannot allocate sctx->mask_datamemory\n");
@@ -1355,6 +1354,12 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     s->framecount++;
 
     if (!s->initialized) {
+#if IS_FFMPEG_71_AND_ABOVE
+        AVFilterLink *outlink = link->dst->outputs[0];
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           ctx->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         ret = ni_bg_config_input(ctx, in);
         if (ret) {
             av_log(ctx, AV_LOG_ERROR, "failed to config input\n");
@@ -1542,7 +1547,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

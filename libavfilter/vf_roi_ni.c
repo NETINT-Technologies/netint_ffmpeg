@@ -31,6 +31,7 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #if HAVE_IO_H
 #include <io.h>
@@ -234,8 +235,8 @@ static int get_yolo_detections(void *ctx, ni_roi_network_layer_t *l, int netw,
 
                 if (det_cache->dets_num >= det_cache->capacity) {
                     dets =
-                        realloc(det_cache->dets,
-                                sizeof(detection) * (det_cache->capacity + 10));
+                        av_realloc(det_cache->dets,
+                                   sizeof(detection) * (det_cache->capacity + 10));
                     if (!dets) {
                         av_log(ctx, AV_LOG_ERROR,
                                "failed to realloc detections capacity %d\n",
@@ -379,7 +380,7 @@ static int resize_coords(void *ctx, detection *dets, int dets_num,
         return 0;
     }
 
-    rbox = malloc(sizeof(struct roi_box) * dets_num);
+    rbox = av_malloc(sizeof(struct roi_box) * dets_num);
     if (!rbox)
         return AVERROR(ENOMEM);
 
@@ -421,7 +422,7 @@ static int resize_coords(void *ctx, detection *dets, int dets_num,
     }
 
     if (rbox_num == 0) {
-        free(rbox);
+        av_freep(&rbox);
         *roi_num = rbox_num;
         *roi_box = NULL;
     } else {
@@ -643,14 +644,10 @@ static void ni_destroy_network(AVFilterContext *ctx, ni_roi_network_t *network)
 
         if (network->layers) {
             for (i = 0; i < network->raw.output_num; i++) {
-                if (network->layers[i].output) {
-                    free(network->layers[i].output);
-                    network->layers[i].output = NULL;
-                }
+                av_freep(&network->layers[i].output);
             }
 
-            free(network->layers);
-            network->layers = NULL;
+            av_freep(&network->layers);
         }
     }
 }
@@ -678,7 +675,7 @@ static int ni_create_network(AVFilterContext *ctx, ni_roi_network_t *network)
     }
 
     network->layers =
-        malloc(sizeof(ni_roi_network_layer_t) * ni_network->output_num);
+        av_malloc(sizeof(ni_roi_network_layer_t) * ni_network->output_num);
     if (!network->layers) {
         av_log(ctx, AV_LOG_ERROR, "cannot allocate network layer memory\n");
         return AVERROR(ENOMEM);
@@ -701,7 +698,7 @@ static int ni_create_network(AVFilterContext *ctx, ni_roi_network_t *network)
                        network->layers[i].channel);
 
         network->layers[i].output =
-            malloc(network->layers[i].output_number * sizeof(float));
+            av_malloc(network->layers[i].output_number * sizeof(float));
         if (!network->layers[i].output) {
             av_log(ctx, AV_LOG_ERROR,
                    "failed to allocate network layer %d output buffer\n", i);
@@ -738,6 +735,7 @@ static av_cold int init_hwframe_scale(AVFilterContext *ctx, NetIntRoiContext *s,
     AVHWFramesContext *pAVHFWCtx;
     AVNIDeviceContext *pAVNIDevCtx;
     int cardno;
+    int pool_size = DEFAULT_NI_FILTER_POOL_SIZE;
 
     hws_ctx = av_mallocz(sizeof(HwScaleContext));
     if (!hws_ctx) {
@@ -769,13 +767,16 @@ static av_cold int init_hwframe_scale(AVFilterContext *ctx, NetIntRoiContext *s,
         goto out;
     }
 
+#if IS_FFMPEG_71_AND_ABOVE
+    pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+#endif
 #if IS_FFMPEG_61_AND_ABOVE
     s->buffer_limit = 1;
 #endif
     /* Create scale frame pool on device */
     retval = ff_ni_build_frame_pool(&hws_ctx->api_ctx, s->network.netw,
                                     s->network.neth, format,
-                                    DEFAULT_NI_FILTER_POOL_SIZE,
+                                    pool_size,
                                     s->buffer_limit);
     if (retval < 0) {
         av_log(ctx, AV_LOG_ERROR, "could not build frame pool\n");
@@ -812,7 +813,7 @@ static av_cold int init(AVFilterContext *ctx)
 
     s->det_cache.dets_num = 0;
     s->det_cache.capacity = 20;
-    s->det_cache.dets     = malloc(sizeof(detection) * s->det_cache.capacity);
+    s->det_cache.dets     = av_malloc(sizeof(detection) * s->det_cache.capacity);
     if (!s->det_cache.dets) {
         av_log(ctx, AV_LOG_ERROR, "failed to allocate detection cache\n");
         return AVERROR(ENOMEM);
@@ -830,10 +831,7 @@ static av_cold void uninit(AVFilterContext *ctx)
 
     ni_destroy_network(ctx, network);
 
-    if (s->det_cache.dets) {
-        free(s->det_cache.dets);
-        s->det_cache.dets = NULL;
-    }
+    av_freep(&s->det_cache.dets);
 
     av_buffer_unref(&s->out_frames_ref);
     s->out_frames_ref = NULL;
@@ -1051,7 +1049,7 @@ static int ni_read_roi(AVFilterContext *ctx, ni_session_data_io_t *p_dst_pkt,
         (int)(roi_num * sizeof(AVRegionOfInterestNetintExtra)));
     if (!sd || !sd_roi_extra) {
         av_log(ctx, AV_LOG_ERROR, "failed to allocate roi sidedata\n");
-        free(roi_box);
+        av_freep(&roi_box);
         return AVERROR(ENOMEM);
     }
 
@@ -1073,7 +1071,7 @@ static int ni_read_roi(AVFilterContext *ctx, ni_session_data_io_t *p_dst_pkt,
                roi[i].qoffset.num, roi[i].qoffset.den);
     }
 
-    free(roi_box);
+    av_freep(&roi_box);
     return 0;
 }
 
@@ -1223,6 +1221,12 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     }
 
     if (!s->initialized) {
+#if IS_FFMPEG_71_AND_ABOVE
+        AVFilterLink *outlink = link->dst->outputs[0];
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           ctx->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         ret = config_input(ctx, in);
         if (ret) {
             av_log(ctx, AV_LOG_ERROR, "failed to config input\n");
@@ -1391,8 +1395,8 @@ static int activate(AVFilterContext *ctx)
         if (ret == NI_RETCODE_ERROR_UNSUPPORTED_FW_VERSION) {
             av_log(ctx, AV_LOG_WARNING, "No backpressure support in FW\n");
         } else if (ret < 0) {
-            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %u available_frame %d outlink framequeue %u frame_wanted %d - return NOT READY\n",
-                __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
             return FFERROR_NOT_READY;
         }
 
@@ -1402,7 +1406,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

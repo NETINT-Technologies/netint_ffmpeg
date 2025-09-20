@@ -32,6 +32,16 @@
 #include "hwaccel.h"
 #endif
 #include "profiles.h"
+
+static const enum AVPixelFormat ni_quadra_vp9_pix_fmts[] = {
+    AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_NV12,
+    AV_PIX_FMT_YUV420P10LE,
+    AV_PIX_FMT_P010LE,
+    AV_PIX_FMT_NI_QUAD,
+    AV_PIX_FMT_NONE
+};
+
 static const AVCodecHWConfigInternal *ff_ni_quad_hw_configs[] = {
     &(const AVCodecHWConfigInternal) {
         .public = {
@@ -58,7 +68,7 @@ static const AVClass vp9_xcoderdec_class = {
 };
 
 #if (LIBAVCODEC_VERSION_MAJOR > 59 || (LIBAVCODEC_VERSION_MAJOR == 59 && LIBAVCODEC_VERSION_MINOR >= 37))
-FFCodec
+const FFCodec
 #else
 AVCodec
 #endif
@@ -74,11 +84,16 @@ ff_vp9_ni_quadra_decoder = {
     .p.id           = AV_CODEC_ID_VP9,
     .p.priv_class   = &vp9_xcoderdec_class,
     .p.capabilities = AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE,
+#if (LIBAVCODEC_VERSION_MAJOR > 61)
+    CODEC_PIXFMTS_ARRAY(ni_quadra_dec_vp9_pix_fmts),
+#else
     .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12,
                                                     AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_P010LE,
                                                     AV_PIX_FMT_NI_QUAD, AV_PIX_FMT_NONE },
+#endif
     .p.profiles     = NULL_IF_CONFIG_SMALL(ff_vp9_profiles),
-    FF_CODEC_RECEIVE_FRAME_CB(xcoder_receive_frame),
+    .p.wrapper_name = "libxcoder_quadra",
+    FF_CODEC_RECEIVE_FRAME_CB(ff_xcoder_receive_frame),
 #else
     .name           = "vp9_ni_quadra_dec",
     .long_name      = NULL_IF_CONFIG_SMALL("VP9 NETINT Quadra decoder v" NI_XCODER_REVISION),
@@ -90,12 +105,13 @@ ff_vp9_ni_quadra_decoder = {
                                                     AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_P010LE,
                                                     AV_PIX_FMT_NI_QUAD, AV_PIX_FMT_NONE },
     .profiles       = NULL_IF_CONFIG_SMALL(ff_vp9_profiles),
-    .receive_frame  = xcoder_receive_frame,
+    .receive_frame  = ff_xcoder_receive_frame,
+    .wrapper_name   = "libxcoder_quadra",
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS,
 #endif
     .priv_data_size = sizeof(XCoderDecContext),
-    .init           = xcoder_decode_init,
-    .close          = xcoder_decode_close,
+    .init           = ff_xcoder_decode_init,
+    .close          = ff_xcoder_decode_close,
     .hw_configs     = ff_ni_quad_hw_configs,
-    .flush          = xcoder_decode_flush,
+    .flush          = ff_xcoder_decode_flush,
 };

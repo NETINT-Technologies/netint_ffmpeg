@@ -123,6 +123,7 @@ typedef struct MpegTSWrite {
 #define MPEGTS_FLAG_OMIT_RAI        0x40
     int flags;
     int copyts;
+    int scte35_copyts;
     int tables_version;
     int64_t pat_period_us;
     int64_t sdt_period_us;
@@ -1033,19 +1034,23 @@ static void mpegts_write_scte35(AVFormatContext *s, int64_t pts, const uint8_t *
     q = data;
     memcpy(payloadSynced, payload, payload_size);
 
-    // set ffmpeg pts
-    if (payloadSynced[13] == 6){ // scte 35 time signal type = 6
-        payloadSynced[15] = (pts & 0xFF000000) >> 24;
-        payloadSynced[16] = (pts & 0x00FF0000) >> 16;
-        payloadSynced[17] = (pts & 0x0000FF00) >> 8;
-        payloadSynced[18] = (pts & 0x000000FF);
-    }else if (payloadSynced[13] == 5){ // scte 35 splice insert type = 5
-        payloadSynced[21] = (pts & 0xFF000000) >> 24;
-        payloadSynced[22] = (pts & 0x00FF0000) >> 16;
-        payloadSynced[23] = (pts & 0x0000FF00) >> 8;
-        payloadSynced[24] = (pts & 0x000000FF);
-    }else{
-        av_log(s, AV_LOG_ERROR, "SCTE35 signal type not yet supported\n");
+    // set ffmpeg pts only when not -scte35_copyts
+    if (payloadSynced[13] != 6 && payloadSynced[13] != 5 &&
+        payloadSynced[13] != 0) {
+        av_log(s, AV_LOG_WARNING, "SCTE35 signal type %d not yet supported\n",
+               payloadSynced[13]);
+    } else if (ts->scte35_copyts < 1) {
+        if (payloadSynced[13] == 6){ // scte 35 time signal type = 6
+            payloadSynced[15] = (pts & 0xFF000000) >> 24;
+            payloadSynced[16] = (pts & 0x00FF0000) >> 16;
+            payloadSynced[17] = (pts & 0x0000FF00) >> 8;
+            payloadSynced[18] = (pts & 0x000000FF);
+        }else if (payloadSynced[13] == 5){ // scte 35 splice insert type = 5
+            payloadSynced[21] = (pts & 0xFF000000) >> 24;
+            payloadSynced[22] = (pts & 0x00FF0000) >> 16;
+            payloadSynced[23] = (pts & 0x0000FF00) >> 8;
+            payloadSynced[24] = (pts & 0x000000FF);
+        }
     }
     memcpy(q, payloadSynced, payload_size);
     q+=payload_size;
@@ -2579,6 +2584,7 @@ static const AVOption options[] = {
     { "omit_rai", "Disable writing of random access indicator",
       0, AV_OPT_TYPE_CONST, { .i64 = MPEGTS_FLAG_OMIT_RAI }, 0, INT_MAX, ENC, .unit = "mpegts_flags" },
     { "mpegts_copyts", "don't offset dts/pts", OFFSET(copyts), AV_OPT_TYPE_BOOL, { .i64 = -1 }, -1, 1, ENC },
+    { "scte35_copyts", "don't offset SCTE-35 pts", OFFSET(scte35_copyts), AV_OPT_TYPE_BOOL, { .i64 = -1 }, -1, 1, ENC },
     { "tables_version", "set PAT, PMT, SDT and NIT version", OFFSET(tables_version), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 31, ENC },
     { "omit_video_pes_length", "Omit the PES packet length for video packets",
       OFFSET(omit_video_pes_length), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, ENC },

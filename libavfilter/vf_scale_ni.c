@@ -33,7 +33,9 @@
 #if !IS_FFMPEG_71_AND_ABOVE
 #include "internal.h"
 #else
+#include "framesync.h"
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 
  // Needed for FFmpeg-n4.3+
@@ -66,6 +68,13 @@ static const char *const var_names[] = {
     "vsub",
     "ohsub",
     "ovsub",
+    "ref_w", "rw",
+    "ref_h", "rh",
+    "ref_a",
+    "ref_sar",
+    "ref_dar", "rdar",
+    "ref_hsub",
+    "ref_vsub",
     "main_w",
     "main_h",
     "main_a",
@@ -88,6 +97,13 @@ enum var_name {
     VAR_VSUB,
     VAR_OHSUB,
     VAR_OVSUB,
+    VAR_REF_W, VAR_RW,
+    VAR_REF_H, VAR_RH,
+    VAR_REF_A,
+    VAR_REF_SAR,
+    VAR_REF_DAR, VAR_RDAR,
+    VAR_REF_HSUB,
+    VAR_REF_VSUB,
     VAR_S2R_MAIN_W,
     VAR_S2R_MAIN_H,
     VAR_S2R_MAIN_A,
@@ -126,6 +142,12 @@ enum AVPixelFormat ff_output_fmt[] = {
 typedef struct NetIntScaleContext {
     const AVClass *class;
     AVDictionary *opts;
+
+#if IS_FFMPEG_71_AND_ABOVE
+    FFFrameSync fs;
+#endif
+
+    int uses_ref;
 
     /**
      * New dimensions. Special values are:
@@ -179,6 +201,10 @@ static int config_props(AVFilterLink *outlink);
 static int config_props(AVFilterLink *outlink, AVFrame *in);
 #endif
 
+#if IS_FFMPEG_71_AND_ABOVE
+static int do_scale(FFFrameSync *fs);
+#endif
+
 #if ((LIBAVFILTER_VERSION_MAJOR >= 8) || ((LIBAVFILTER_VERSION_MAJOR == 7) && (LIBAVFILTER_VERSION_MINOR >= 85)))
 static int check_exprs(AVFilterContext *ctx)
 {
@@ -206,6 +232,19 @@ static int check_exprs(AVFilterContext *ctx)
     if ((vars_w[VAR_OUT_H] || vars_w[VAR_OH]) &&
         (vars_h[VAR_OUT_W] || vars_h[VAR_OW])) {
         av_log(ctx, AV_LOG_WARNING, "Circular references detected for width '%s' and height '%s' - possibly invalid.\n", scale->w_expr, scale->h_expr);
+    }
+
+    if (vars_w[VAR_REF_W]    || vars_h[VAR_REF_W]    ||
+        vars_w[VAR_RW]       || vars_h[VAR_RW]       ||
+        vars_w[VAR_REF_H]    || vars_h[VAR_REF_H]    ||
+        vars_w[VAR_RH]       || vars_h[VAR_RH]       ||
+        vars_w[VAR_REF_A]    || vars_h[VAR_REF_A]    ||
+        vars_w[VAR_REF_SAR]  || vars_h[VAR_REF_SAR]  ||
+        vars_w[VAR_REF_DAR]  || vars_h[VAR_REF_DAR]  ||
+        vars_w[VAR_RDAR]     || vars_h[VAR_RDAR]     ||
+        vars_w[VAR_REF_HSUB] || vars_h[VAR_REF_HSUB] ||
+        vars_w[VAR_REF_VSUB] || vars_h[VAR_REF_VSUB]) {
+        scale->uses_ref = 1;
     }
 
     if (ctx->filter != &ff_vf_scale2ref_ni_quadra &&
@@ -321,6 +360,20 @@ static int scale_eval_dimensions(AVFilterContext *ctx)
         scale->var_values[VAR_S2R_MAIN_VSUB] = 1 << main_desc->log2_chroma_h;
     }
 
+    if (scale->uses_ref) {
+        const AVFilterLink *reflink = ctx->inputs[1];
+        const AVPixFmtDescriptor *ref_desc = av_pix_fmt_desc_get(reflink->format);
+        scale->var_values[VAR_REF_W] = scale->var_values[VAR_RW] = reflink->w;
+        scale->var_values[VAR_REF_H] = scale->var_values[VAR_RH] = reflink->h;
+        scale->var_values[VAR_REF_A] = (double) reflink->w / reflink->h;
+        scale->var_values[VAR_REF_SAR] = reflink->sample_aspect_ratio.num ?
+            (double) reflink->sample_aspect_ratio.num / reflink->sample_aspect_ratio.den : 1;
+        scale->var_values[VAR_REF_DAR] = scale->var_values[VAR_RDAR] =
+            scale->var_values[VAR_REF_A] * scale->var_values[VAR_REF_SAR];
+        scale->var_values[VAR_REF_HSUB] = 1 << ref_desc->log2_chroma_w;
+        scale->var_values[VAR_REF_VSUB] = 1 << ref_desc->log2_chroma_h;
+    }
+
     res = av_expr_eval(scale->w_pexpr, scale->var_values, NULL);
     scale->var_values[VAR_OUT_W] = scale->var_values[VAR_OW] = (int) res == 0 ? inlink->w : (int) res;
 
@@ -375,6 +428,13 @@ static av_cold int init_dict(AVFilterContext *ctx, AVDictionary **opts)
     NetIntScaleContext *scale = ctx->priv;
     int ret;
 
+#if IS_FFMPEG_71_AND_ABOVE
+    if (ctx->filter == &ff_vf_scale2ref_ni_quadra) {
+        av_log(ctx, AV_LOG_ERROR, "ni_quadra_scale2ref is deprecated, use ni_quadra_scale=rw:rh instead\n");
+        return AVERROR(EINVAL);
+    }
+#endif
+
     if (scale->size_str && (scale->w_expr || scale->h_expr)) {
         av_log(ctx, AV_LOG_ERROR,
                "Size and width/height expressions cannot be set at the same time.\n");
@@ -420,6 +480,19 @@ static av_cold int init_dict(AVFilterContext *ctx, AVDictionary **opts)
     *opts = NULL;
 #endif
 
+#if IS_FFMPEG_71_AND_ABOVE
+    if (ctx->filter != &ff_vf_scale2ref_ni_quadra && scale->uses_ref) {
+        AVFilterPad pad = {
+            .name = "ref",
+            .type = AVMEDIA_TYPE_VIDEO,
+        };
+        ret = ff_append_inpad(ctx, &pad);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+#endif
+
     return 0;
 }
 
@@ -443,6 +516,12 @@ static av_cold void uninit(AVFilterContext *ctx)
 
     av_buffer_unref(&scale->out_frames_ref);
     av_buffer_unref(&scale->out_frames_ref_1);
+
+#if IS_FFMPEG_71_AND_ABOVE
+    if (scale->uses_ref) {
+        ff_framesync_uninit(&scale->fs);
+    }
+#endif
 }
 
 static int init_out_pool(AVFilterContext *ctx)
@@ -459,6 +538,11 @@ static int init_out_pool(AVFilterContext *ctx)
     if (s->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 
 #if IS_FFMPEG_61_AND_ABOVE
     s->buffer_limit = 1;
@@ -666,6 +750,33 @@ static int config_props(AVFilterLink *outlink, AVFrame *in)
     if (!ctx->outputs[0]->hw_frames_ctx)
         return AVERROR(ENOMEM);
 #endif
+
+#if IS_FFMPEG_71_AND_ABOVE
+    if (scale->uses_ref && ctx->filter != &ff_vf_scale2ref_ni_quadra) {
+        ff_framesync_uninit(&scale->fs);
+        ret = ff_framesync_init(&scale->fs, ctx, ctx->nb_inputs);
+        if (ret < 0) {
+            return ret;
+        }
+
+        scale->fs.on_event        = do_scale;
+        scale->fs.in[0].time_base = ctx->inputs[0]->time_base;
+        scale->fs.in[0].sync      = 1;
+        scale->fs.in[0].before    = EXT_STOP;
+        scale->fs.in[0].after     = EXT_STOP;
+
+        av_assert0(ctx->nb_inputs == 2);
+        scale->fs.in[1].time_base = ctx->inputs[1]->time_base;
+        scale->fs.in[1].sync      = 0;
+        scale->fs.in[1].before    = EXT_NULL;
+        scale->fs.in[1].after     = EXT_INFINITY;
+
+        ret = ff_framesync_configure(&scale->fs);
+        if (ret < 0)
+            return ret;
+    }
+#endif
+
     return 0;
 
 fail:
@@ -824,6 +935,11 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
                 goto fail;
         }
 
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           link->dst->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         retcode = init_out_pool(link->dst);
 
         if (retcode < 0) {
@@ -1012,9 +1128,53 @@ static int filter_frame_ref(AVFilterLink *link, AVFrame *in)
     return ff_filter_frame(outlink, in);
 }
 
+#if IS_FFMPEG_71_AND_ABOVE
+static int do_scale(FFFrameSync *fs)
+{
+    AVFilterContext *ctx = fs->parent;
+    NetIntScaleContext *scale = ctx->priv;
+    AVFilterLink *inlink = ctx->inputs[0];
+    AVFilterLink *outlink = ctx->outputs[0];
+    AVFrame *in = NULL, *ref = NULL;
+    int ret = 0;
+
+    if (ff_inlink_check_available_frame(outlink)) {
+        return FFERROR_NOT_READY;
+    }
+
+    ret = ff_framesync_get_frame(fs, 0, &in, 1);
+    if (ret < 0) {
+        goto err;
+    }
+
+    if (scale->uses_ref) {
+        ret = ff_framesync_get_frame(fs, 1, &ref, 0);
+        if (ret < 0) {
+            goto err;
+        }
+    }
+
+    ret = filter_frame(inlink, in);
+    return ret;
+
+err:
+    if (in) {
+      av_frame_free(&in);
+    }
+    return ret;
+}
+#endif
+
 #if IS_FFMPEG_61_AND_ABOVE
 static int activate(AVFilterContext *ctx)
 {
+#if IS_FFMPEG_71_AND_ABOVE
+    NetIntScaleContext *scale = ctx->priv;
+    if (scale->uses_ref) {
+        return ff_framesync_activate(&scale->fs);
+    }
+#endif
+
     AVFilterLink  *inlink = ctx->inputs[0];
     AVFilterLink  *outlink = ctx->outputs[0];
     AVFrame *frame = NULL;
@@ -1024,8 +1184,8 @@ static int activate(AVFilterContext *ctx)
     // Forward the status on output link to input link, if the status is set, discard all queued frames
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
-    av_log(ctx, AV_LOG_TRACE, "%s: ready %u inlink framequeue %u available_frame %d outlink framequeue %u frame_wanted %d\n",
-        __func__, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+    av_log(ctx, AV_LOG_TRACE, "%s: inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d\n",
+        __func__, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
 
     if (ff_inlink_check_available_frame(inlink)) {
         if (s->initialized) {
@@ -1035,8 +1195,8 @@ static int activate(AVFilterContext *ctx)
         if (ret == NI_RETCODE_ERROR_UNSUPPORTED_FW_VERSION) {
             av_log(ctx, AV_LOG_WARNING, "No backpressure support in FW\n");
         } else if (ret < 0) {
-            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %u available_frame %d outlink framequeue %u frame_wanted %d - return NOT READY\n",
-                __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
             return FFERROR_NOT_READY;
         }
 
@@ -1046,7 +1206,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

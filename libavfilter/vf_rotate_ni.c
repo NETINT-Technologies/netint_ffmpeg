@@ -37,8 +37,10 @@
 #include "internal.h"
 #else
 #include "libavutil/mem.h"
+#include "fftools/ffmpeg_sched.h"
 #endif
 #include "filters.h"
+#include "libavutil/avstring.h"
 
 #define BUFFER_WIDTH_PIXEL_ALIGNMENT 16
 
@@ -193,7 +195,6 @@ static int config_props_delayed(AVFilterLink *outlink, AVFrame *in)
     int ret;
     double res;
     char *expr;
-    AVFilterLink *inlink_for_skip;
 
     rot->hsub = pixdesc->log2_chroma_w;
     rot->vsub = pixdesc->log2_chroma_h;
@@ -340,6 +341,7 @@ static int config_props_delayed(AVFilterLink *outlink, AVFrame *in)
             return AVERROR(ENOMEM);
         }
 #else
+        AVFilterLink *inlink_for_skip;
         inlink_for_skip = outlink->src->inputs[0];
 
         rot->out_frames_ref = av_buffer_ref(inlink_for_skip->hw_frames_ctx);
@@ -406,6 +408,11 @@ static int init_out_pool(AVFilterContext *ctx)
     if (rot->api_ctx.isP2P) {
         pool_size = 1;
     }
+#if IS_FFMPEG_71_AND_ABOVE
+    else {
+        pool_size += ctx->extra_hw_frames > 0 ? ctx->extra_hw_frames : 0;
+    }
+#endif
 #if IS_FFMPEG_61_AND_ABOVE
     rot->buffer_limit = 1;
 #endif
@@ -486,6 +493,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
         rot->session_opened = true;
 
+#if IS_FFMPEG_71_AND_ABOVE
+        if (!((av_strstart(outlink->dst->filter->name, "ni_quadra", NULL)) || (av_strstart(outlink->dst->filter->name, "hwdownload", NULL)))) {
+           inlink->dst->extra_hw_frames = (DEFAULT_FRAME_THREAD_QUEUE_SIZE > 1) ? DEFAULT_FRAME_THREAD_QUEUE_SIZE : 0;
+        }
+#endif
         ni_retcode = init_out_pool(inlink->dst);
         if (ni_retcode != NI_RETCODE_SUCCESS) {
             av_log(ctx, AV_LOG_ERROR, "ni rotate filter init out pool failed with %d\n", ni_retcode);
@@ -677,7 +689,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     out->hw_frames_ctx = av_buffer_ref(out_buffer_ref);
     out->data[3] = av_malloc(sizeof(niFrameSurface1_t));
     if (!out->data[3]) {
-        av_log(ctx, AV_LOG_ERROR, "ni rotate filter av_alloc returned NULL\n");
+        av_log(ctx, AV_LOG_ERROR, "ni rotate filter av_malloc returned NULL\n");
         retcode = AVERROR(ENOMEM);
         goto FAIL;
     }
@@ -753,8 +765,8 @@ static int activate(AVFilterContext *ctx)
         if (ret == NI_RETCODE_ERROR_UNSUPPORTED_FW_VERSION) {
             av_log(ctx, AV_LOG_WARNING, "No backpressure support in FW\n");
         } else if (ret < 0) {
-            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, ready %u inlink framequeue %u available_frame %d outlink framequeue %u frame_wanted %d - return NOT READY\n",
-                __func__, ret, ctx->ready, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
+            av_log(ctx, AV_LOG_WARNING, "%s: query ret %d, inlink framequeue %lu available_frame %d outlink framequeue %lu frame_wanted %d - return NOT READY\n",
+                __func__, ret, ff_inlink_queued_frames(inlink), ff_inlink_check_available_frame(inlink), ff_inlink_queued_frames(outlink), ff_outlink_frame_wanted(outlink));
             return FFERROR_NOT_READY;
         }
 
@@ -764,7 +776,7 @@ static int activate(AVFilterContext *ctx)
 
         ret = filter_frame(inlink, frame);
         if (ret >= 0) {
-            ff_filter_set_ready(ctx, 300);
+            ff_filter_set_ready(ctx, 100);
         }
         return ret;
     }

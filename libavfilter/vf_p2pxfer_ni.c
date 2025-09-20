@@ -462,7 +462,7 @@ static int filter_frame(AVFilterLink *link, AVFrame *frame)
             goto fail;
         }
 
-        free(ni_dev_info);
+        ni_memfree(ni_dev_info);
 
         av_log(ctx, AV_LOG_DEBUG, "Import DMA buf: src domain %d, bus %d, dev %d, func %d\n",
                domain,bus,dev,func);

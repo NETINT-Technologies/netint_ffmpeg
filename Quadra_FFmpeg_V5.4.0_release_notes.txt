@@ -1,4 +1,67 @@
 ================================================================================
+Release version: 5.4.0_RC2
+Date: 2025-09-15            SW version: 5.4.0_RC2           FW version: 5.4.0_RC1
+Compat FW API ver: 6sJ      Libxcoder API ver: 2.79
+--------------------------------------------------------------------------------
+[LIBAVCODEC] Fix ni_quadra function names
+             Fix function names as per FFmpeg's coding style. Functions
+             out of file scope should begin with prefix "ff_". Functions
+             not needed outside of file scope should be declared static.
+[FFMPEG/LIBAVCODEC] Remove nicodec.c
+                    De-couple encoders from decoders in libavcodec. Move
+                    code from nicodec.c to nidec.c. Remove nicodec.c. Move
+                    some structures out of nicodec.h into nidec.h and nienc.h.
+[FFMPEG] Support auto-rotate for Netint Quadra hardware frames using ni_quadra_rotate filter
+[LIBAVFILTER] Set ni filters ready flag priority same as ffmpeg filters
+[LIBAVCODEC] Fix and update FFCodec fields
+             Declare FFCodec const. Add missing 'wrapper name' field. Add new
+             CODEC_PIXFMTS macro. Update AV_CODEC_CAP_HARDWARE capabilities
+             bitmask in encoders. Add color_ranges field in 7.1 and higher.
+             Add missing AV_PIX_FMT_NI_QUAD support in h265 decoder.
+[LIBAVCODEC] Fix fast sequence change check conditions to match with FW
+[FFMPEG/LIBAVCODEC] Fixed duplicate SPS/PPS added at sequence change for flv
+[FFMPEG/LIBAVFILTER] Ai_pre filter support use ai align feature
+                     	- Changing FW API version to 6sI
+                     	- Changing Libxcoder API version to 2.79
+[FFMPEG/LIBAVFILTER] Remove libavfilter format string warnings
+                     Remove format string warnings from libavfilter. Remove
+                     references to AVFilterContext->ready which will be
+                     deprecated in a future FFmpeg.
+[LIBAVCODEC] Fix ticks_per_frame
+             Changes to accommodate deprecation of avc->ticks_per_frame
+             field in upcoming FFmpeg 8.0 release.
+[FFMPEG] Fix encode failure caused by incorrect bit depth and false sequence change for RGBA/ARGB/ABGR/BGRA format
+[LIBAVCODEC] Support upcoming change to key frames
+             Remove usage of deprecated 'key_frame' field which is
+             to be replaced with a bit in the 'flags' field when
+             the libavutil major revision is >= 60.
+[FFMPEG/LIBAVCODEC] Support timecode passthru in SEI
+[FFMPEG/LIBAVFILTER] Update Overlay filter call av_hwframe_ctx_init after setting sw format
+[LIBAVCODEC] Free frame buffer in exception paths in ff_xcoder_dec_receive
+[LIBAVFILTER] Resolve avfreep bug in ni_quadra_bg filter
+[LIBAVFILTER] Fix src and dst buffer size mismatch for ai_pre filter
+              Changing Libxcoder API version to 2.78
+[LIBAVFILTER] Add buffer backpressure support for ni_quadra_scale in FFmpeg-n7.1
+[LIBAVCODEC] Explicit check of gen_global_headers during header generation
+[FFMPEG/LIBAVCODEC] Changes to gen_global_headers default
+                        1. gen_global_headers default set to auto
+                        2. Remove NETINT change in FFmpeg initialization routine to check for file extensions and setting gen_global_headers on
+                        3. Update apiexamples to check for AVFMT_GLOBALHEADER flag
+                        4. Update NETINT_FFMPEG_CHANGE_LIST.txt
+[FFMPEG/LIBAVCODEC] Support reconfig decoder PPU for each frame
+                    	- Changing FW API version to 6sF
+                    	- Changing Libxcoder API version to 2.77
+                    	- Update NETINT_FFMPEG_CHANGE_LIST.txt
+[LIBAVCODEC] Change a printf() to av_log() in nienc.c
+[LIBAVCODEC] When recycling NI HW AVFrames, use source device_handle
+[LIBAVCODEC] Trim oversized SEI messages. Fixes a invalid pointer access.
+[FFMPEG/LIBAVCODEC/LIBAVFILTER] Replace generic malloc() and free() with av_malloc() and av_free() or ni_memfree()
+                                ni_custom_sei_set_t in nienc.c will still use regular malloc() as it is free'd in libxcoder ni_encoder_session_close()
+[FFMPEG] Fix an issue where hvsplus filter is not recognized in FFmpeg-n6.1
+[FFMPEG] Port scte35_copyts option of mpegts muxer into FFmpeg-n7.1
+[LIBAVCODEC/LIBAVFILTER] Extra membin request to decoder and scaler based on DEFAULT_FRAME_THREAD_QUEUE_SIZE
+[LIBAVFILTER] Update ni_quadra_scale to achieve the function of ni_quadra_scale2ref in FFmpeg-n7.1+
+================================================================================
 Release version: 5.3.0_RC2
 Date: 2025-06-07            SW version: 5.3.0_RC2           FW version: 5.3.0_RC2
 Compat FW API ver: 6sB      Libxcoder API ver: 2.76
@@ -416,7 +479,6 @@ Compat FW API ver: 6T       Libxcoder API ver: 2.31
 [LIBAVCODEC] Fix memory leak when parsing user params for Netint codecs
 [FFMPEG] Fix unintended cropping when using text shadow in ni_quadra_drawtext filter
 [FFMPEG] Fix memory leak when closing ni_quadra_drawbox filter
-[FFMPEG] Fix discrepancy between windows and linux results of ni_quadra_hwdownload filter
 [FFMPEG] In build_ffmpeg.sh add `--static` arg to compile ffmpeg entirely static
 [FFMPEG/LIBAVCODEC] Auto-insert ni_quadra_rotate filter when hw frames needs auto-rotation (eg. when mp4 metadata specifies rotate)
 [FFMPEG] Fix a small memory leak when closing ni_quadra_split filter
@@ -439,7 +501,6 @@ Compat FW API ver: 6M       Libxcoder API ver: 2.23
 [FFMPEG] Fix missing chroma component in output when using ni_quadra_scale to change pixfmt from semiplanar (nv12, p010le) to planar (yuv420p, yuv420p10le) then immediately using ni_quadra_hwdownload
 [FFMPEG] Add Android_quick_installer scripts to SW release package
 [FFMPEG] Fix bug compiling FFmpeg with Quadra and Logan support disabled by adding libxcoder as a dependency for Netint filters in FFmpeg configure script dependency checks
-[FFMPEG] Add support for Quadra+Logan co-existence on Windows
 [FFMPEG] In ni_quadra_overlay/avoverlay_ni_quadra filter, add support for inplace overlay for improved performance
          - Enable functionality with param "inplace=1"
          - Note, do not use inplace overlay after ni_split or split filter in filter graph

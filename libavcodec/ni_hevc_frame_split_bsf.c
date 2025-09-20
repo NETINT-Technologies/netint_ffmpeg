@@ -729,9 +729,7 @@ static void hevc_frame_split_close(AVBSFContext *ctx) {
 
     for (i = 0; i < HEVC_MAX_PPS_COUNT; i++) {
         if (s->tiles[i]) {
-            if (s->tiles[i]->column_width) {
-                av_freep(&s->tiles[i]->column_width);
-            }
+            av_freep(&s->tiles[i]->column_width);
             av_freep(&s->tiles[i]);
         }
     }

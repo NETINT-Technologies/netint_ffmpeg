@@ -335,6 +335,10 @@ typedef struct RcOverride{
  */
 #define AV_CODEC_FLAG_LOW_DELAY       (1 << 19)
 /**
+ * NETINT: flag that indicates mp4 or mov extension output
+ */
+#define AV_CODEC_FLAG_MP4_MOV         (1 << 21)
+/**
  * Place global headers in extradata instead of every keyframe.
  */
 #define AV_CODEC_FLAG_GLOBAL_HEADER   (1 << 22)

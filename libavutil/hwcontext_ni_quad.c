@@ -64,7 +64,7 @@ static int ni_device_create(AVHWDeviceContext *ctx, const char *device,
     uint32_t max_io_size = NI_INVALID_IO_SIZE;
     ni_device_t *p_ni_devices = NULL;
 
-    p_ni_devices = calloc(1, sizeof(ni_device_t));
+    p_ni_devices = av_calloc(1, sizeof(ni_device_t));
     if(p_ni_devices == NULL) {
         av_log(ctx, AV_LOG_ERROR, "could not allocate memory for p_ni_devices in %s", __func__);
         return AVERROR_UNKNOWN;
@@ -111,7 +111,7 @@ static int ni_device_create(AVHWDeviceContext *ctx, const char *device,
         ret = AVERROR_UNKNOWN;
     }
 END:
-    free(p_ni_devices);
+    av_freep(&p_ni_devices);
     return ret;
 }
 
@@ -507,7 +507,7 @@ static int ni_frames_init(AVHWFramesContext *ctx) //hwupload runs this on hwuplo
             f_hwctx->api_ctx.pixel_format     = NI_PIX_FMT_NV16;
             break;
         default:
-            av_log(ctx, AV_LOG_ERROR, "Pixel format not supported by device.\n");
+            av_log(ctx, AV_LOG_ERROR, "Pixel format %s not supported by device.\n", av_get_pix_fmt_name(ctx->sw_format));
             return AVERROR(EINVAL);
     }
 
@@ -1024,6 +1024,69 @@ static int ni_hwdl_frame(AVHWFramesContext *hwfc, AVFrame *dst,
     return 0;
 }
 
+static void ff_ni_set_bit_depth_and_encoding_type(int8_t *p_bit_depth,
+                                           int8_t *p_enc_type,
+                                           enum AVPixelFormat pix_fmt)
+{
+    // bit depth is 1 for 8-bit format, 2 for 10-bit format
+    // encoding type should be 1 for planar or packed, 0 for semi-planar
+    switch (pix_fmt)
+    {
+        case AV_PIX_FMT_YUV420P:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 1;   // planar
+            break;
+
+        case AV_PIX_FMT_YUV420P10LE:
+            *p_bit_depth = 2;   // 10-bits per component
+            *p_enc_type  = 1;   // planar
+            break;
+
+        case AV_PIX_FMT_NV12:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 0;   // semi-planar
+            break;
+        case AV_PIX_FMT_NI_QUAD_8_TILE_4X4:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type = NI_PIXEL_PLANAR_FORMAT_TILED4X4;   // semi-planar
+            break;
+        case AV_PIX_FMT_P010LE:
+            *p_bit_depth = 2;   // 10-bits per component
+            *p_enc_type  = 0;   // semi-planar
+            break;
+
+        case AV_PIX_FMT_YUYV422:
+        case AV_PIX_FMT_UYVY422:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 1;   // packed
+            break;
+
+        case AV_PIX_FMT_NV16:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 0;   // semi-planar
+            break;
+
+        case AV_PIX_FMT_BGRP:
+        case AV_PIX_FMT_RGBA:
+        case AV_PIX_FMT_BGRA:
+        case AV_PIX_FMT_ABGR:
+        case AV_PIX_FMT_ARGB:
+        case AV_PIX_FMT_BGR0:
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 1;   // packed or planar
+            break;
+
+        default:
+            av_log(NULL, AV_LOG_WARNING, "WARNING: unexpected pix format %s\n",
+                   av_get_pix_fmt_name(pix_fmt));
+
+            // use default values if we've supported a new pixel format
+            *p_bit_depth = 1;   // 8-bits per component
+            *p_enc_type  = 1;   // planar or packed
+            break;
+    }
+}
+
 static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *src)
 {
     AVNIFramesContext *f_hwctx = (AVNIFramesContext*) hwfc->hwctx;
@@ -1032,7 +1095,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
     int ret = 0;
     int dst_stride[4];
     int pixel_format;
-    bool isSemiPlanar;
     int need_to_copy = 1;
     size_t crop_right = 0, crop_bottom = 0;
 
@@ -1054,7 +1116,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_YUV420P;
-        isSemiPlanar = false;
         break;
 
     /* 10-bit YUV420 planar, little-endian, least significant bits */
@@ -1065,7 +1126,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_YUV420P10LE;
-        isSemiPlanar = false;
         break;
 
     /* 8-bit YUV420 semi-planar */
@@ -1076,7 +1136,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_NV12;
-        isSemiPlanar = true;
         break;
 
     /* 8-bit yuv422 semi-planar */
@@ -1087,7 +1146,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_NV16;
-        isSemiPlanar = false;
         break;
 
     /*8-bit yuv422 planar */
@@ -1098,7 +1156,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_YUYV422;
-        isSemiPlanar = false;
         break;
 
     case AV_PIX_FMT_UYVY422:
@@ -1108,7 +1165,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_UYVY422;
-        isSemiPlanar = false;
         break;
 
     /* 10-bit YUV420 semi-planar, little endian, most significant bits */
@@ -1119,7 +1175,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_P010LE;
-        isSemiPlanar = true;
         break;
 
     /* 32-bit RGBA packed */
@@ -1131,7 +1186,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_RGBA;
-        isSemiPlanar = false;
         break;
 
     case AV_PIX_FMT_BGRA:
@@ -1141,7 +1195,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_BGRA;
-        isSemiPlanar = false;
         break;
 
     case AV_PIX_FMT_ABGR:
@@ -1151,7 +1204,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_ABGR;
-        isSemiPlanar = false;
         break;
 
     case AV_PIX_FMT_ARGB:
@@ -1161,7 +1213,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_ARGB;
-        isSemiPlanar = false;
         break;
 
     case AV_PIX_FMT_BGR0:
@@ -1171,7 +1222,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_BGR0;
-        isSemiPlanar = false;
         break;
 
     /* 24-bit BGR planar not supported for hwupload */
@@ -1183,7 +1233,6 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
         dst_stride[3] = 0;
 
         pixel_format = NI_PIX_FMT_BGRP;
-        isSemiPlanar = false;
         break;
     */
     default:
@@ -1245,9 +1294,9 @@ static int ni_hwup_frame(AVHWFramesContext *hwfc, AVFrame *dst, const AVFrame *s
     dst_surf->ui16width = f_hwctx->split_ctx.w[0] = src->width;
     dst_surf->ui16height = f_hwctx->split_ctx.h[0] = src->height;
     dst_surf->ui32nodeAddress = 0; // always 0 offset for upload
-    dst_surf->encoding_type = isSemiPlanar ? NI_PIXEL_PLANAR_FORMAT_SEMIPLANAR
-                                           : NI_PIXEL_PLANAR_FORMAT_PLANAR;
-
+    ff_ni_set_bit_depth_and_encoding_type(&dst_surf->bit_depth,
+                                          &dst_surf->encoding_type,
+                                          src->format);
     av_log(hwfc, AV_LOG_VERBOSE, "%s trace ui16FrameIdx = [%u] hdl %d SID%d\n",
            __func__, dst_surf->ui16FrameIdx, dst_surf->device_handle,
            dst_surf->ui16session_ID);

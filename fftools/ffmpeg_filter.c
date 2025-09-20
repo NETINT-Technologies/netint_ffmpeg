@@ -1746,57 +1746,65 @@ static int configure_input_video_filter(FilterGraph *fg, AVFilterGraph *graph,
 
         theta = get_rotation(displaymatrix);
 
-        // NETINT: call ni_quadra_rotate if the input format is NI_QUAD,
-        // else call ffmpeg default transpose filter.
-        if (ifp->format == AV_PIX_FMT_NI_QUAD)
-        {
-            const char ni_filter_str[80] = { 0 };
-            const char *ni_filter_desc = "%s:ow=%d:oh=%d";
-            if (fabs(theta - 90) < 1.0) {
-                snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
-                    "PI/2", ifp->height, ifp->width);
-                ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
-            } else if (fabs(theta - 180) < 1.0) {
-                snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
-                    "PI", ifp->width, ifp->height);
-                ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
-            } else if (fabs(theta - 270) < 1.0) {
-                snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
-                    "-PI/2", ifp->height, ifp->width);
-                ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
-            } else if (fabs(theta) > 1.0) {
-                av_log(fg, AV_LOG_ERROR, "Error: ni_quadra_rotate doesnt support rotating %f!\n", fabs(theta));
-                ret = AVERROR(EINVAL);
+        if (fabs(theta - 90) < 1.0) {
+            ret = insert_filter(&last_filter, &pad_idx, "transpose",
+                                displaymatrix[3] > 0 ? "cclock_flip" : "clock");
+        } else if (fabs(theta - 180) < 1.0) {
+            if (displaymatrix[0] < 0) {
+                ret = insert_filter(&last_filter, &pad_idx, "hflip", NULL);
+                if (ret < 0)
+                    return ret;
             }
-        }
-        else
-        {
-            if (fabs(theta - 90) < 1.0) {
-                ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                    displaymatrix[3] > 0 ? "cclock_flip" : "clock");
-            } else if (fabs(theta - 180) < 1.0) {
-                if (displaymatrix[0] < 0) {
-                    ret = insert_filter(&last_filter, &pad_idx, "hflip", NULL);
-                    if (ret < 0)
-                        return ret;
-                }
-                if (displaymatrix[4] < 0) {
-                    ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-                }
-            } else if (fabs(theta - 270) < 1.0) {
-                ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                    displaymatrix[3] < 0 ? "clock_flip" : "cclock");
-            } else if (fabs(theta) > 1.0) {
-                char rotate_buf[64];
-                snprintf(rotate_buf, sizeof(rotate_buf), "%f*PI/180", theta);
-                ret = insert_filter(&last_filter, &pad_idx, "rotate", rotate_buf);
-            } else if (fabs(theta) < 1.0) {
-                if (displaymatrix && displaymatrix[4] < 0) {
-                    ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-                }
+            if (displaymatrix[4] < 0) {
+                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
+            }
+        } else if (fabs(theta - 270) < 1.0) {
+            ret = insert_filter(&last_filter, &pad_idx, "transpose",
+                                displaymatrix[3] < 0 ? "clock_flip" : "cclock");
+        } else if (fabs(theta) > 1.0) {
+            char rotate_buf[64];
+            snprintf(rotate_buf, sizeof(rotate_buf), "%f*PI/180", theta);
+            ret = insert_filter(&last_filter, &pad_idx, "rotate", rotate_buf);
+        } else if (fabs(theta) < 1.0) {
+            if (displaymatrix && displaymatrix[4] < 0) {
+                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
             }
         }
 
+        if (ret < 0)
+            return ret;
+
+        ifp->displaymatrix_applied = 1;
+    }
+
+    // NETINT: call ni_quadra_rotate if the input format is NI_QUAD
+    if ((ifp->opts.flags & IFILTER_FLAG_AUTOROTATE) &&
+            (desc->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
+            ifp->format == AV_PIX_FMT_NI_QUAD)
+    {
+        int32_t *displaymatrix = ifp->displaymatrix;
+        double theta;
+
+        theta = get_rotation(displaymatrix);
+
+        const char ni_filter_str[80] = { 0 };
+        const char *ni_filter_desc = "%s:ow=%d:oh=%d";
+        if (fabs(theta - 90) < 1.0) {
+            snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
+                "PI/2", ifp->height, ifp->width);
+            ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
+        } else if (fabs(theta - 180) < 1.0) {
+            snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
+                "PI", ifp->width, ifp->height);
+            ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
+        } else if (fabs(theta - 270) < 1.0) {
+            snprintf (ni_filter_str, sizeof (ni_filter_str), ni_filter_desc,
+                "-PI/2", ifp->height, ifp->width);
+            ret = insert_filter(&last_filter, &pad_idx, "ni_quadra_rotate", ni_filter_str);
+        } else if (fabs(theta) > 1.0) {
+            av_log(fg, AV_LOG_ERROR, "Error: ni_quadra_rotate doesnt support rotating %f!\n", fabs(theta));
+            ret = AVERROR(EINVAL);
+        }
         if (ret < 0)
             return ret;
 

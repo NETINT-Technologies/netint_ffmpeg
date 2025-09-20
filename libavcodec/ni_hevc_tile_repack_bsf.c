@@ -266,12 +266,10 @@ fail_alloc_pkts:
     for (i -= 1; i >= 0; i--) {
         av_packet_free(&s->tile_pkt[i]);
     }
-    free(s->tile_pkt);
-    s->tile_pkt = NULL;
+    av_freep(&s->tile_pkt);
 
 fail_alloc_tile_pkt:
     av_packet_free(&s->buffer_pkt);
-    s->buffer_pkt = NULL;
 
     return ret;
 }
@@ -292,13 +290,11 @@ static void hevc_tile_repack_close(AVBSFContext *ctx) {
     int i;
 
     av_packet_free(&s->buffer_pkt);
-    s->buffer_pkt = NULL;
 
     for (i = 0; i < s->tile_num; i++) {
         av_packet_free(&s->tile_pkt[i]);
     }
-    free(s->tile_pkt);
-    s->tile_pkt = NULL;
+    av_freep(&s->tile_pkt);
 }
 
 static const enum AVCodecID hevc_tile_repack_codec_ids[] = {
